@@ -1,0 +1,56 @@
+name: Posting Alerts
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # Runs every hour (UTC)
+  workflow_dispatch:       # Manual trigger
+
+jobs:
+  run-alerts:
+    runs-on: ubuntu-latest
+
+    steps:
+    # -----------------------------
+    # 1. Checkout Repo
+    # -----------------------------
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # -----------------------------
+    # 2. Setup Python
+    # -----------------------------
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    # -----------------------------
+    # 3. Install Requirements
+    # -----------------------------
+    - name: Install dependencies
+      run: |
+        cd Alerts
+        pip install --upgrade pip
+        pip install -r requirements.txt
+
+    # -----------------------------
+    # 4. Run Script
+    # -----------------------------
+    - name: Run Posting Alerts Script
+      env:
+        CHAT_IDS_JSON: ${{ secrets.CHAT_IDS_JSON }}
+        # Add more secrets here if needed later
+      run: |
+        cd Alerts
+        python posting_alerts.py
+
+    # -----------------------------
+    # 5. Debug Output (optional)
+    # -----------------------------
+    - name: Show directory and logs
+      if: failure()
+      run: |
+        echo "=== Directory ==="
+        ls -R .
+        echo "=== Python Version ==="
+        python --version
