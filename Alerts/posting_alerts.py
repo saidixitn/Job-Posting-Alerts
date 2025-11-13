@@ -9,8 +9,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ===================== CONFIG =====================
-LOCAL_MONGO_URI = "mongodb://localhost:27017/"
-TELEGRAM_BOT_TOKEN = "8384963131:AAHeirGrDv9bcOXOEFKOhzsAErCC7Wwt4go"
+LOCAL_MONGO_URI = os.getenv("LOCAL_MONGO_URI")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+if not LOCAL_MONGO_URI:
+    raise Exception("LOCAL_MONGO_URI environment variable is missing")
+
+if not TELEGRAM_BOT_TOKEN:
+    raise Exception("TELEGRAM_BOT_TOKEN environment variable is missing")
+
 MAX_WORKERS = 20
 
 
