@@ -29,7 +29,7 @@ except Exception as e:
 def fmt_k(num):
     try:
         num = float(num)
-        return f"{num/1000:.1f}k" if num >= 1000 else str(int(num))
+        return f"{num/1000:.1f}k" if num >= 1000 else str(num)
     except:
         return "-"
 
@@ -170,9 +170,15 @@ def process_domain(domain, utc_now):
 
     left = fmt_k(max(0, quota - posted))
 
+    # Convert 'left' to float for comparison and handle the 'k' properly
+    try:
+        left_value = float(left.replace('k', '').strip()) if 'k' in left else float(left)
+    except ValueError:
+        left_value = 0.0  # Default to 0 if conversion fails
+
     # Send alert if no posting in the last hour and quota left
-    if hr == 0 and int(left.replace("k", "")) > 0:
-        return None
+    if hr == 0 and left_value > 0:
+        return None  # This will trigger a no-posts alert if condition is met
 
     return {
         "Domain": name,
