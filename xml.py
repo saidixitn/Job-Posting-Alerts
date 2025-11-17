@@ -2,6 +2,7 @@ import requests
 from pymongo import MongoClient
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
+import email.utils
 import os
 
 # ======= CONFIG =======
@@ -15,56 +16,68 @@ IST_OFFSET = timedelta(hours=5, minutes=30)
 # ---------- Helpers ---------- #
 
 def utc_now():
-    """UTC now (timezone aware)."""
     return datetime.now(timezone.utc)
 
-
 def to_ist(dt_utc):
-    """IST = UTC + 5:30."""
     return dt_utc + IST_OFFSET
+
+def normalize_last_modified(raw_value):
+    """
+    Normalize Last-Modified header to a stable UTC datetime.
+    Prevents false refresh detections due to formatting differences.
+    """
+    try:
+        dt = email.utils.parsedate_to_datetime(raw_value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+
+        # Remove microseconds for stable comparison
+        dt = dt.replace(microsecond=0)
+
+        return dt
+    except:
+        return None
 
 
 def fetch_last_modified(url):
-    """Retrieve Last-Modified header ONLY. No fallback."""
+    """HEAD request + normalize Last-Modified."""
     try:
         head = requests.head(url, timeout=10, allow_redirects=True)
     except:
         return None
 
-    last_mod = head.headers.get("Last-Modified")
-    if not last_mod:
+    raw = head.headers.get("Last-Modified")
+    if not raw:
         return None
 
-    try:
-        dt = datetime.strptime(last_mod, "%a, %d %b %Y %H:%M:%S %Z")
-        return dt.replace(tzinfo=timezone.utc)
-    except:
-        return None
+    return normalize_last_modified(raw)
 
 
 # ---------- Core Processing ---------- #
 
 def process_feed(feed, history):
-    employerId = feed.get("employerId")
-    employerName = feed.get("employerName")
-    xml_url = feed.get("xml_url")
+    employerId = feed["employerId"]
+    employerName = feed["employerName"]
+    xml_url = feed["xml_url"]
 
     print(f"🔍 Checking {employerId}")
 
-    # Get Last-Modified ONLY — no fallback
     last_mod_utc = fetch_last_modified(xml_url)
 
-    # Skip if we cannot get Last-Modified properly
+    # No valid last-modified? Skip
     if last_mod_utc is None:
         print("⚠️ No valid Last-Modified — skipping\n")
         return
 
     last_mod_ist = to_ist(last_mod_utc)
+
     now_utc = utc_now()
     now_ist = to_ist(now_utc)
     today = now_utc.strftime("%Y-%m-%d")
 
-    # Check if this employer already has history
+    # Fetch existing history doc
     doc = history.find_one({"_id": employerId})
 
     # -------- FIRST ENTRY -------- #
@@ -94,11 +107,12 @@ def process_feed(feed, history):
         })
         return
 
-    # -------- SKIP IF NO ACTUAL CHANGE -------- #
+    # -------- SAFE UPDATE CHECK -------- #
     prev = doc.get("xml_last_updated_utc")
 
-    if prev is not None and prev == last_mod_utc:
-        print("⏩ No actual update — skipping\n")
+    # 🛑 If previous = current → DO NOTHING
+    if prev == last_mod_utc:
+        print("⏩ No new update — skipping\n")
         return
 
     # -------- FEED UPDATED -------- #
@@ -126,6 +140,7 @@ def process_feed(feed, history):
             "times": [new_event]
         })
 
+    # Update the main document
     history.update_one(
         {"_id": employerId},
         {
