@@ -1,0 +1,29 @@
+name: XML Monitoring
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # Runs every 30 minutes
+  workflow_dispatch:         # Allows manual manual trigger
+
+jobs:
+  run-monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        pip install requests pymongo dnspython certifi
+
+    - name: Run XML Monitoring Script
+      env:
+        MONGO_URI: ${{ secrets.MONGO_URI }}
+      run: |
+        python xml.py
