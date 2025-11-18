@@ -2,18 +2,18 @@ import logging, json, os
 from datetime import datetime, timedelta, timezone
 from pymongo import MongoClient
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeout
 
 # ===================== CONFIG =====================
 LOCAL_MONGO_URI = os.getenv("LOCAL_MONGO_URI", "mongodb://localhost:27017/")
 BOT = os.getenv("TELEGRAM_BOT_TOKEN", "")
 MAX_WORKERS = 8
+THREAD_TIMEOUT = 20  # seconds per domain
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [INFO] %(message)s")
 
-local = MongoClient(LOCAL_MONGO_URI)
+local = MongoClient(LOCAL_MONGO_URI, serverSelectionTimeoutMS=5000)
 CLIENT_CACHE = {}
-
 
 # ===================== TIME HELPERS =====================
 def now_times():
@@ -24,39 +24,25 @@ def now_times():
 def quiet_hours(ist):
     return (ist.hour == 2 and ist.minute >= 30) or (3 <= ist.hour < 11) or (ist.hour == 11 and ist.minute < 30)
 
-
-# ===================== TZ FIX =====================
 def make_aware(dt):
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
-
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 # ===================== CHAT IDS =====================
 def get_chat_ids():
-    s = os.getenv("CHAT_IDS_JSON")
-    if s:
-        try: return json.loads(s)
-        except: pass
-
     if os.path.exists("chatids.json"):
         return json.load(open("chatids.json"))
-
     return {}
-
 
 # ===================== DB ROUTING =====================
 def pick_db(dtype, domain):
-    dtype = dtype.lower()
-    clean = domain.split(".")[0]
+    dtype = (dtype or "").lower()
+    clean = domain.split("/")[0].split(".")[0]
 
-    if dtype in ["programmatic", "prog"]:
-        return f"{clean}_prod", "Target_P4_Opt"
+    if "proxy" in dtype:
+        return None, None
     if "sub" in dtype:
         return "directclients_prod", "Target_P4_Opt"
-
-    return None, None
-
+    return f"{clean}_prod", "Target_P4_Opt"
 
 def get_remote_client(db):
     if db in CLIENT_CACHE:
@@ -66,26 +52,33 @@ def get_remote_client(db):
     if not rec:
         return None
 
-    uri = rec["mongo_uri"]
-    client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+    client = MongoClient(
+        rec["mongo_uri"],
+        serverSelectionTimeoutMS=4000,
+        connectTimeoutMS=4000,
+        socketTimeoutMS=4000
+    )
     CLIENT_CACHE[db] = client
     return client
 
-
-# ===================== FAST FETCH (1 QUERY ONLY) =====================
+# ===================== FETCH =====================
 def fast_fetch(col, emp, day_start, utc):
-    base_filter = {
-        "gpost": {"$in": [3, 5]},
+    q = {
+        "gpost": 5,
         "job_status": {"$ne": 3},
-        "gpost_date": {"$gte": day_start, "$lt": utc},
+        "gpost_date": {"$gte": day_start, "$lt": utc}
     }
-
     if emp:
-        base_filter["employerId"] = emp
+        q["employerId"] = emp
+    return list(col.find(q, {"gpost_date": 1}))
 
-    return list(col.find(base_filter, {"gpost": 1, "gpost_date": 1}))
+def fetch_queue_count(col, emp):
+    q = {"gpost": 3, "job_status": {"$ne": 3}}
+    if emp:
+        q["employerId"] = emp
+    return col.count_documents(q)
 
-
+# ===================== METRICS =====================
 def compute_metrics(docs, quota, utc):
     hr1_start = utc.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
     hr1_end   = hr1_start + timedelta(hours=1)
@@ -93,23 +86,17 @@ def compute_metrics(docs, quota, utc):
     hr2_start = hr1_start - timedelta(hours=1)
     hr2_end   = hr1_start
 
-    posted = queue = hr = prev = 0
+    posted = hr = prev = 0
 
     for d in docs:
         ts = make_aware(d["gpost_date"])
-        g  = d["gpost"]
+        posted += 1
+        if hr1_start <= ts < hr1_end:
+            hr += 1
+        elif hr2_start <= ts < hr2_end:
+            prev += 1
 
-        if g == 5:
-            posted += 1
-            if hr1_start <= ts < hr1_end:
-                hr += 1
-            elif hr2_start <= ts < hr2_end:
-                prev += 1
-        elif g == 3:
-            queue += 1
-
-    return posted, hr, prev, queue, max(0, quota - posted)
-
+    return posted, hr, prev, max(0, quota - posted)
 
 # ===================== PROCESS PER DOMAIN =====================
 def process_domain(dom, utc):
@@ -134,8 +121,17 @@ def process_domain(dom, utc):
     col = client[db][coll]
     day_start = utc.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    docs = fast_fetch(col, emp, day_start, utc)
-    posted, hr, prev, queue, left = compute_metrics(docs, quota, utc)
+    try:
+        docs = fast_fetch(col, emp, day_start, utc)
+    except:
+        return None
+
+    posted, hr, prev, left = compute_metrics(docs, quota, utc)
+
+    try:
+        queue = fetch_queue_count(col, emp)
+    except:
+        queue = 0
 
     return {
         "Domain": name,
@@ -147,21 +143,16 @@ def process_domain(dom, utc):
         "QuotaLeft": left
     }
 
-
-# ===================== TERMINAL OUTPUT =====================
+# ===================== PRINT =====================
 def print_summary(rows):
-    print("\n======== DOMAIN RESULTS ========\n")
+    print("\n======== RESULTS ========\n")
     for r in rows:
-        print(f"Domain:       {r['Domain']}")
-        print(f"Posted:       {r['Posted']}")
-        print(f"Hr:           {r['Hr']}")
-        print(f"Prev:         {r['Prev']}")
-        print(f"Diff:         {r['Diff']}")
-        print(f"Queue:        {r['Queue']}")
-        print(f"Quota Left:   {r['QuotaLeft']}")
+        print(f"{r['Domain']}")
+        print(f"  Posted: {r['Posted']}")
+        print(f"  Hr: {r['Hr']} | Prev: {r['Prev']} | Diff: {r['Diff']}")
+        print(f"  Queue: {r['Queue']} | Left: {r['QuotaLeft']}")
         print("------------------------------------")
-    print("================================\n")
-
+    print("==========================\n")
 
 # ===================== ALERTS =====================
 def build_alerts(rows, utc, ist):
@@ -180,10 +171,8 @@ def build_alerts(rows, utc, ist):
         for r in arr:
             msg += (
                 f"<b>{r['Domain']}</b>\n"
-                f"Posted: {r['Posted']}\n"
-                f"Hr: {r['Hr']} (prev {r['Prev']}) | Diff: {r['Diff']}\n"
-                f"Queue: {r['Queue']}\n"
-                f"Quota Left: {r['QuotaLeft']}\n\n"
+                f"Posted: {r['Posted']} | Hr: {r['Hr']} | Prev: {r['Prev']}\n"
+                f"Queue: {r['Queue']} | Left: {r['QuotaLeft']}\n\n"
             )
         return msg
 
@@ -194,41 +183,30 @@ def build_alerts(rows, utc, ist):
 
     return alerts
 
-
-# ===================== TELEGRAM =====================
-def send(cid, msg):
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT}/sendMessage",
-            json={"chat_id": cid, "text": msg, "parse_mode": "HTML"},
-            timeout=10
-        )
-    except:
-        pass
-
-
 # ===================== MAIN =====================
 def main():
-    start_time = datetime.now()  # TIMER ADDED
-
+    start = datetime.now()
     utc, ist = now_times()
 
     domains = list(local["domain_postings"]["domains"].find({}, {"_id": 0}))
     print("Loaded domains:", len(domains))
 
-    if not domains:
-        print("No domains found in database.")
-        return
-
     results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        for f in as_completed([ex.submit(process_domain, d, utc) for d in domains]):
-            r = f.result()
-            if r:
-                results.append(r)
+        futures = [ex.submit(process_domain, d, utc) for d in domains]
+
+        for f in futures:
+            try:
+                r = f.result(timeout=THREAD_TIMEOUT)
+                if r:
+                    results.append(r)
+            except FutureTimeout:
+                print("⚠️ Thread timeout for one domain — skipping.")
+            except:
+                pass
 
     if not results:
-        print("No valid results for any domain.")
+        print("❌ No data.")
         return
 
     results.sort(key=lambda x: x["Posted"], reverse=True)
@@ -236,19 +214,12 @@ def main():
     print_summary(results)
 
     alerts = build_alerts(results, utc, ist)
-    chat_ids = get_chat_ids()
-
-    for cid in chat_ids.values():
+    for cid in get_chat_ids().values():
         for a in alerts:
             send(cid, a)
 
-    # EXECUTION TIME PRINT
-    end_time = datetime.now()
-    duration = (end_time - start_time).total_seconds()
-    print(f"\nScript finished in {duration:.2f} seconds\n")
-
+    print(f"\nDone in {(datetime.now() - start).total_seconds():.2f}s\n")
     logging.info("Run OK.")
-
 
 if __name__ == "__main__":
     main()
