@@ -161,10 +161,32 @@ def build_alerts(rows, utc, ist):
 
     alerts = []
 
-    drops       = [r for r in rows if abs(r["Diff"]) >= 500]
-    no_queue    = [r for r in rows if r["Queue"] == 0 and r["QuotaLeft"] > 0]
+    # 1. Posting stopped this hour
+    stopped = [
+        r for r in rows
+        if r["Hr"] == 0 and r["Prev"] > 0
+    ]
+
+    # 2. Queue stuck (work exists but no posting)
+    queue_stuck = [
+        r for r in rows
+        if r["Hr"] == 0 and r["Queue"] > 0 and r["QuotaLeft"] > 0
+    ]
+
+    # 3. Major slowdown vs previous hour
+    slowdown = [
+        r for r in rows
+        if r["Prev"] > 20 and r["Hr"] < r["Prev"] * 0.6
+    ]
+
+    # 4. Never started
     not_started = [r for r in rows if r["Posted"] == 0]
-    stopped     = [r for r in rows if r["Hr"] == 0 and r["Queue"] == 0]
+
+    # 5. No queue but quota left
+    no_queue = [
+        r for r in rows
+        if r["Queue"] == 0 and r["QuotaLeft"] > 0
+    ]
 
     def block(title, arr):
         msg = f"⚠️ <b>{title}</b>\nUTC {utc:%H:%M} | IST {ist:%H:%M}\n\n"
@@ -176,10 +198,11 @@ def build_alerts(rows, utc, ist):
             )
         return msg
 
-    if drops: alerts.append(block("Posting Change > 500", drops))
-    if no_queue: alerts.append(block("No Queue but Quota Left", no_queue))
-    if not_started: alerts.append(block("No Postings Started", not_started))
-    if stopped: alerts.append(block("Posting Stopped", stopped))
+    if stopped:     alerts.append(block("Posting Stopped", stopped))
+    if queue_stuck: alerts.append(block("Queue Stuck — No Posting Flow", queue_stuck))
+    if slowdown:    alerts.append(block("Posting Drop > 40%", slowdown))
+    if not_started: alerts.append(block("Not Started", not_started))
+    if no_queue:    alerts.append(block("No Queue but Quota Left", no_queue))
 
     return alerts
 
