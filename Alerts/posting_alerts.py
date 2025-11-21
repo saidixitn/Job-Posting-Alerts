@@ -156,53 +156,67 @@ def print_summary(rows):
 
 # ===================== ALERTS =====================
 def build_alerts(rows, utc, ist):
+    # Respect quiet hours
     if quiet_hours(ist):
         return []
 
-    alerts = []
-
-    # 1. Posting stopped this hour
+    # ----- ALERT CONDITIONS -----
     stopped = [
         r for r in rows
         if r["Hr"] == 0 and r["Prev"] > 0
     ]
 
-    # 2. Queue stuck (work exists but no posting)
     queue_stuck = [
         r for r in rows
         if r["Hr"] == 0 and r["Queue"] > 0 and r["QuotaLeft"] > 0
     ]
 
-    # 3. Major slowdown vs previous hour
     slowdown = [
         r for r in rows
         if r["Prev"] > 20 and r["Hr"] < r["Prev"] * 0.6
     ]
 
-    # 4. Never started
-    not_started = [r for r in rows if r["Posted"] == 0]
+    not_started = [
+        r for r in rows
+        if r["Posted"] == 0
+    ]
 
-    # 5. No queue but quota left
     no_queue = [
         r for r in rows
         if r["Queue"] == 0 and r["QuotaLeft"] > 0
     ]
 
-    def block(title, arr):
-        msg = f"⚠️ <b>{title}</b>\nUTC {utc:%H:%M} | IST {ist:%H:%M}\n\n"
-        for r in arr:
-            msg += (
-                f"<b>{r['Domain']}</b>\n"
-                f"Posted: {r['Posted']} | Hr: {r['Hr']} | Prev: {r['Prev']}\n"
-                f"Queue: {r['Queue']} | Left: {r['QuotaLeft']}\n\n"
-            )
-        return msg
+    # ----- GROUPED ALERT FORMAT (Slack-style) -----
+    alert_groups = {
+        "Posting Stopped": stopped,
+        "Queue Stuck — No Posting Flow": queue_stuck,
+        "Posting Drop > 40%": slowdown,
+        "No Postings Started": not_started,
+        "No Queue but Quota Left": no_queue,
+    }
 
-    if stopped:     alerts.append(block("Posting Stopped", stopped))
-    if queue_stuck: alerts.append(block("Queue Stuck — No Posting Flow", queue_stuck))
-    if slowdown:    alerts.append(block("Posting Drop > 40%", slowdown))
-    if not_started: alerts.append(block("Not Started", not_started))
-    if no_queue:    alerts.append(block("No Queue but Quota Left", no_queue))
+    alerts = []
+
+    for title, items in alert_groups.items():
+        if not items:
+            continue
+
+        # Header for this alert group
+        msg = (
+            f"⚠️ <b>{title}</b>\n"
+            f"UTC {utc:%H:%M} | IST {ist:%H:%M}\n"
+            f"<b>{len(items)} domain(s) affected</b>\n\n"
+        )
+
+        # Add domain lines
+        for r in items:
+            msg += (
+                f"• <b>{r['Domain']}</b>\n"
+                f"  Hr: {r['Hr']} | Prev: {r['Prev']}\n"
+                f"  Queue: {r['Queue']} | Left: {r['QuotaLeft']}\n\n"
+            )
+
+        alerts.append(msg)
 
     return alerts
 
