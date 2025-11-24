@@ -122,6 +122,13 @@ def process_domain(dom, utc):
     emp = dom.get("EmployerId")
     quota = dom.get("Quota", 0)
 
+    dtype = (dom.get("Domain Type", "") or "").lower()
+
+    # PROXY LOGIC
+    if "proxy" in dtype:
+        return process_proxy_domain(dom, utc)
+
+    # NORMAL LOGIC CONTINUES
     db, coll = pick_db(dtype, name)
     if not db:
         return None
@@ -149,6 +156,100 @@ def process_domain(dom, utc):
         queue = fetch_queue_count(col, emp)
     except:
         queue = 0
+
+    return {
+        "Domain": name,
+        "Posted": posted,
+        "Hr": hr,
+        "Prev": prev,
+        "Diff": hr - prev,
+        "Queue": queue,
+        "QuotaLeft": left
+    }
+
+def process_proxy_domain(dom, utc):
+    """
+    Proxy domains DO NOT use gpost / job_status.
+    They use jobsGoogleSubmittedLog in prod_jobiak_ai.
+    """
+
+    name = dom["Domain"].strip().rstrip("/")
+    emp = dom.get("EmployerId")
+    quota = dom.get("Quota", 0)
+
+    # proxy always uses SAME DB + SAME COLLECTION
+    db_name = "prod_jobiak_ai"
+    coll_name = "jobsGoogleSubmittedLog"
+
+    client = get_remote_client(db_name)
+    if not client:
+        return None
+
+    col = client[db_name][coll_name]
+
+    # day start
+    day_start = utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    match_stage = {
+        "createdAt": {"$gte": day_start, "$lt": utc}
+    }
+
+    if emp:
+        match_stage["employerId"] = emp
+
+    # ------------------------------
+    # RUN AGGREGATION
+    # ------------------------------
+    try:
+        pipeline = [
+            {"$match": match_stage},
+            {
+                "$group": {
+                    "_id": {
+                        "hour": {
+                            "$dateToString": {
+                                "format": "%Y-%m-%d %H",
+                                "date": "$createdAt"
+                            }
+                        }
+                    },
+                    "count": {"$sum": 1}
+                }
+            }
+        ]
+
+        aggr = list(col.aggregate(pipeline))
+    except Exception as e:
+        logging.error(f"Proxy aggregation failed for {name}: {e}")
+        return None
+
+    # ------------------------------
+    # COMPUTE METRICS SAME AS NORMAL
+    # ------------------------------
+    posted = sum(a["count"] for a in aggr)
+
+    # last 2 hours windows
+    hr1_start = utc.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+    hr2_start = hr1_start - timedelta(hours=1)
+
+    hr1_key = hr1_start.strftime("%Y-%m-%d %H")
+    hr2_key = hr2_start.strftime("%Y-%m-%d %H")
+
+    hr = 0
+    prev = 0
+
+    for a in aggr:
+        hour = a["_id"]["hour"]
+        count = a["count"]
+        if hour == hr1_key:
+            hr = count
+        elif hour == hr2_key:
+            prev = count
+
+    left = max(0, quota - posted)
+
+    # NO QUEUE for proxy → set queue = 0
+    queue = 0
 
     return {
         "Domain": name,
