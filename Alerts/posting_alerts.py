@@ -55,43 +55,21 @@ def get_remote_client(db):
 
     uri = rec["mongo_uri"].strip()
 
-    # ---------------------------------------------------------
-    # FIX: Enforce required Atlas params for mongodb:// URIs
-    # ---------------------------------------------------------
-    # If no params, append them
-    if "?" not in uri:
-        uri += "?"
-    else:
-        uri += "&"
-
-    # Add required flags (idempotent)
-    required = [
-        "tls=true",
-        "retryWrites=true",
-        "w=majority",
-        "readPreference=primary",
-        "authSource=admin"
-    ]
-
-    # Only add flags that are missing
-    for flag in required:
-        if flag not in uri:
-            uri += f"{flag}&"
-
-    # Cleanup trailing &
-    if uri.endswith("&"):
+    # -------------------------------------------------------
+    # CLEAN UP DOUBLE ? OR EXTRA & OCCASIONALLY IN YOUR DATA
+    # -------------------------------------------------------
+    if uri.endswith("?"):
         uri = uri[:-1]
 
-    # ---------------------------------------------------------
-    # CONNECT (mongodb:// + TLS)
-    # ---------------------------------------------------------
+    # -------------------------------------------------------
+    # CONNECT TO PLAINTEXT STANDALONE MONGOD
+    # -------------------------------------------------------
     try:
         client = MongoClient(
             uri,
-            tls=True,  # mandatory for Atlas
-            serverSelectionTimeoutMS=8000,
-            connectTimeoutMS=8000,
-            socketTimeoutMS=8000
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
+            socketTimeoutMS=5000
         )
         client.admin.command("ping")
     except Exception as e:
