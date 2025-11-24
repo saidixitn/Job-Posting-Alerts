@@ -55,21 +55,20 @@ def get_remote_client(db):
 
     uri = rec["mongo_uri"].strip()
 
-    # -------------------------------------------------------
-    # CLEAN UP DOUBLE ? OR EXTRA & OCCASIONALLY IN YOUR DATA
-    # -------------------------------------------------------
+    # Clean up accidental trailing '?'
     if uri.endswith("?"):
         uri = uri[:-1]
 
-    # -------------------------------------------------------
-    # CONNECT TO PLAINTEXT STANDALONE MONGOD
-    # -------------------------------------------------------
     try:
         client = MongoClient(
             uri,
-            serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=5000,
-            socketTimeoutMS=5000
+            serverSelectionTimeoutMS=8000,
+            connectTimeoutMS=8000,
+            socketTimeoutMS=8000,
+
+            # ✨ THE 2 LINES THAT FIX EVERYTHING:
+            tls=False,                 # Your servers DO NOT support SSL
+            directConnection=True      # Prevents replicaSet probing / Primary() selector
         )
         client.admin.command("ping")
     except Exception as e:
