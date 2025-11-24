@@ -2,7 +2,7 @@ import logging, json, os
 from datetime import datetime, timedelta, timezone
 from pymongo import MongoClient
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeout
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 # ===================== CONFIG =====================
 LOCAL_MONGO_URI = os.getenv("LOCAL_MONGO_URI", "mongodb://localhost:27017/")
@@ -66,7 +66,6 @@ def get_remote_client(db):
         return None
 
     uri = rec["mongo_uri"].strip()
-
     if uri.endswith("?"):
         uri = uri[:-1]
 
@@ -76,8 +75,8 @@ def get_remote_client(db):
             serverSelectionTimeoutMS=8000,
             connectTimeoutMS=8000,
             socketTimeoutMS=8000,
-            tls=False,               # Standalone non-TLS mongo
-            directConnection=True    # Required for standalone servers
+            tls=False,
+            directConnection=True
         )
         client.admin.command("ping")
     except Exception as e:
@@ -88,11 +87,11 @@ def get_remote_client(db):
     return client
 
 # ===================== FETCH =====================
-def fast_fetch(col, emp, day_start, utc):
+def fast_fetch(col, emp, start_time, utc):
     q = {
         "gpost": 5,
         "job_status": {"$ne": 3},
-        "gpost_date": {"$gte": day_start, "$lt": utc}
+        "gpost_date": {"$gte": start_time, "$lt": utc}
     }
     if emp:
         q["employerId"] = emp
@@ -124,12 +123,12 @@ def compute_metrics(docs, quota, utc):
 
     return posted, hr, prev, max(0, quota - posted)
 
-# ===================== PROXY LOGIC =====================
+# ===================== PROXY LOGIC (FIXED) =====================
 def process_proxy_domain(dom, utc):
 
     name = dom["Domain"].strip().rstrip("/")
     emp = dom.get("EmployerId")
-    quota = dom.get("Quota", 0)
+    quota = dom.get("Quota") or 5000  # fallback quota
 
     db_name = dom.get("DB", "prod_jobiak_ai")
     coll_name = "jobsGoogleSubmittedLog"
@@ -140,11 +139,9 @@ def process_proxy_domain(dom, utc):
 
     col = client[db_name][coll_name]
 
-    day_start = utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_time = utc - timedelta(hours=2)
 
-    match_stage = {
-        "createdAt": {"$gte": day_start, "$lt": utc}
-    }
+    match_stage = {"createdAt": {"$gte": start_time, "$lt": utc}}
     if emp:
         match_stage["employerId"] = emp
 
@@ -209,7 +206,7 @@ def process_domain(dom, utc):
         return process_proxy_domain(dom, utc)
 
     emp = dom.get("EmployerId")
-    quota = dom.get("Quota", 0)
+    quota = dom.get("Quota") or 5000  # FIXED fallback quota
 
     db, coll = pick_db(dtype, name)
     if not db:
@@ -225,10 +222,9 @@ def process_domain(dom, utc):
         return None
 
     col = client[db][coll]
-    day_start = utc.replace(hour=0, minute=0, second=0, microsecond=0)
-
+    start_time = utc - timedelta(hours=2)  # FIXED
     try:
-        docs = fast_fetch(col, emp, day_start, utc)
+        docs = fast_fetch(col, emp, start_time, utc)
     except:
         return None
 
@@ -319,7 +315,7 @@ def main():
                 r = f.result(timeout=THREAD_TIMEOUT)
                 if r:
                     results.append(r)
-            except FutureTimeout:
+            except TimeoutError:
                 print("⚠️ Thread timeout for one domain — skipping.")
             except Exception as e:
                 logging.error(f"Thread error: {e}")
