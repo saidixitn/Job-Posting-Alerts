@@ -2,7 +2,7 @@ import logging, json, os
 from datetime import datetime, timedelta, timezone
 from pymongo import MongoClient
 import requests
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeout
 
 # ===================== CONFIG =====================
 LOCAL_MONGO_URI = os.getenv("LOCAL_MONGO_URI", "mongodb://localhost:27017/")
@@ -21,13 +21,8 @@ def now_times():
     ist = utc.astimezone(timezone(timedelta(hours=5, minutes=30)))
     return utc, ist
 
-# Mandatory Quiet Hours: 2:30 AM – 11:30 AM IST
 def quiet_hours(ist):
-    return (
-        (ist.hour == 2 and ist.minute >= 30)
-        or (3 <= ist.hour < 11)
-        or (ist.hour == 11 and ist.minute < 30)
-    )
+    return (ist.hour == 2 and ist.minute >= 30) or (3 <= ist.hour < 11) or (ist.hour == 11 and ist.minute < 30)
 
 def make_aware(dt):
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -49,27 +44,55 @@ def pick_db(dtype, domain):
         return "directclients_prod", "Target_P4_Opt"
     return f"{clean}_prod", "Target_P4_Opt"
 
-# ===================== FIXED MONGO CLIENT =====================
 def get_remote_client(db):
     if db in CLIENT_CACHE:
         return CLIENT_CACHE[db]
 
     rec = local["mongo_creds"]["creds"].find_one({"domain": db}, {"mongo_uri": 1})
     if not rec:
-        logging.error(f"No mongo creds for {db}")
+        logging.error(f"No mongo URI for {db}")
         return None
 
     uri = rec["mongo_uri"].strip()
 
-    # Force SRV format & TLS for GitHub Actions
-    if uri.startswith("mongodb://"):
-        uri = uri.replace("mongodb://", "mongodb+srv://")
+    # ---------------------------------------------------------
+    # FIX: Enforce required Atlas params for mongodb:// URIs
+    # ---------------------------------------------------------
+    # If no params, append them
+    if "?" not in uri:
+        uri += "?"
+    else:
+        uri += "&"
 
-    if "tls=true" not in uri:
-        uri += "&tls=true" if "?" in uri else "?tls=true"
+    # Add required flags (idempotent)
+    required = [
+        "tls=true",
+        "retryWrites=true",
+        "w=majority",
+        "readPreference=primary",
+        "authSource=admin"
+    ]
 
+    # Only add flags that are missing
+    for flag in required:
+        if flag not in uri:
+            uri += f"{flag}&"
+
+    # Cleanup trailing &
+    if uri.endswith("&"):
+        uri = uri[:-1]
+
+    # ---------------------------------------------------------
+    # CONNECT (mongodb:// + TLS)
+    # ---------------------------------------------------------
     try:
-        client = MongoClient(uri, serverSelectionTimeoutMS=8000, tls=True)
+        client = MongoClient(
+            uri,
+            tls=True,  # mandatory for Atlas
+            serverSelectionTimeoutMS=8000,
+            connectTimeoutMS=8000,
+            socketTimeoutMS=8000
+        )
         client.admin.command("ping")
     except Exception as e:
         logging.error(f"Mongo connect failed for {db}: {e}")
@@ -98,10 +121,10 @@ def fetch_queue_count(col, emp):
 # ===================== METRICS =====================
 def compute_metrics(docs, quota, utc):
     hr1_start = utc.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
-    hr1_end = hr1_start + timedelta(hours=1)
+    hr1_end   = hr1_start + timedelta(hours=1)
 
     hr2_start = hr1_start - timedelta(hours=1)
-    hr2_end = hr1_start
+    hr2_end   = hr1_start
 
     posted = hr = prev = 0
 
@@ -130,21 +153,24 @@ def process_domain(dom, utc):
     if not client:
         return None
 
+    try:
+        client.admin.command("ping")
+    except:
+        return None
+
     col = client[db][coll]
     day_start = utc.replace(hour=0, minute=0, second=0, microsecond=0)
 
     try:
         docs = fast_fetch(col, emp, day_start, utc)
-    except Exception as e:
-        logging.error(f"Fetch failed for {name}: {e}")
+    except:
         return None
 
     posted, hr, prev, left = compute_metrics(docs, quota, utc)
 
     try:
         queue = fetch_queue_count(col, emp)
-    except Exception as e:
-        logging.error(f"Queue count failed for {name}: {e}")
+    except:
         queue = 0
 
     return {
@@ -168,24 +194,17 @@ def print_summary(rows):
         print("------------------------------------")
     print("==========================\n")
 
-# ===================== TELEGRAM SEND =====================
-def send(cid, text):
-    try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{BOT}/sendMessage",
-            json={"chat_id": cid, "text": text, "parse_mode": "HTML"},
-            timeout=10
-        )
-        r.raise_for_status()
-    except Exception as e:
-        logging.error(f"Telegram send failed: {e}")
-
 # ===================== ALERTS =====================
 def build_alerts(rows, utc, ist):
+    # Respect quiet hours
     if quiet_hours(ist):
         return []
 
-    stopped = [r for r in rows if r["Hr"] == 0 and r["Prev"] > 0]
+    # ----- ALERT CONDITIONS -----
+    stopped = [
+        r for r in rows
+        if r["Hr"] == 0 and r["Prev"] > 0
+    ]
 
     queue_stuck = [
         r for r in rows
@@ -197,12 +216,17 @@ def build_alerts(rows, utc, ist):
         if r["Prev"] > 20 and r["Hr"] < r["Prev"] * 0.6
     ]
 
-    not_started = [r for r in rows if r["Posted"] == 0]
-
-    no_queue = [
-        r for r in rows if r["Queue"] == 0 and r["QuotaLeft"] > 0
+    not_started = [
+        r for r in rows
+        if r["Posted"] == 0
     ]
 
+    no_queue = [
+        r for r in rows
+        if r["Queue"] == 0 and r["QuotaLeft"] > 0
+    ]
+
+    # ----- GROUPED ALERT FORMAT (Slack-style) -----
     alert_groups = {
         "Posting Stopped": stopped,
         "Queue Stuck — No Posting Flow": queue_stuck,
@@ -217,12 +241,14 @@ def build_alerts(rows, utc, ist):
         if not items:
             continue
 
+        # Header for this alert group
         msg = (
             f"⚠️ <b>{title}</b>\n"
             f"UTC {utc:%H:%M} | IST {ist:%H:%M}\n"
             f"<b>{len(items)} domain(s) affected</b>\n\n"
         )
 
+        # Add domain lines
         for r in items:
             msg += (
                 f"• <b>{r['Domain']}</b>\n"
@@ -252,12 +278,12 @@ def main():
                 if r:
                     results.append(r)
             except FutureTimeout:
-                logging.error("Thread timeout for one domain")
-            except Exception as e:
-                logging.error(f"Thread error: {e}")
+                print("⚠️ Thread timeout for one domain — skipping.")
+            except:
+                pass
 
     if not results:
-        logging.error("❌ No data.")
+        print("❌ No data.")
         return
 
     results.sort(key=lambda x: x["Posted"], reverse=True)
@@ -269,7 +295,8 @@ def main():
         for a in alerts:
             send(cid, a)
 
-    logging.info(f"Run OK in {(datetime.now() - start).total_seconds():.2f}s")
+    print(f"\nDone in {(datetime.now() - start).total_seconds():.2f}s\n")
+    logging.info("Run OK.")
 
 if __name__ == "__main__":
     main()
