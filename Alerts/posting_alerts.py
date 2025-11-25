@@ -44,6 +44,10 @@ def get_chat_ids():
         return json.load(open("chatids.json"))
     return {}
 
+def get_admin_chat_id():
+    ids = get_chat_ids()
+    return ids.get("admin")
+
 # ===================== DB ROUTING =====================
 def pick_db(dtype, domain):
     dtype = (dtype or "").lower()
@@ -393,11 +397,27 @@ def main():
 
     print_summary(results)
 
+    # ========= SEND POSTING SUMMARY ONLY TO ADMIN =========
+    admin_cid = get_admin_chat_id()
+    if admin_cid:
+        summary = "📊 <b>Posting Summary</b>\n\n"
+        for r in results:
+            summary += (
+                f"• <b>{r['Domain']}</b>\n"
+                f"  Posted: {r['Posted']}\n"
+                f"  Hr: {r['Hr']} | PrevHr: {r['Prev']}\n"
+                f"  Queue: {r['Queue']} | Left: {r['QuotaLeft']}\n\n"
+            )
+        send(admin_cid, summary)
+    else:
+        logging.error("Admin not found in chatids.json")
+
     alerts = build_alerts(results, utc, ist)
 
     for r in results:
         save_state(r, utc)
 
+    # alerts still go to ALL chat IDs
     for cid in get_chat_ids().values():
         for a in alerts:
             send(cid, a)
