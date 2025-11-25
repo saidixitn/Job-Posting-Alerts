@@ -49,7 +49,7 @@ def pick_db(dtype, domain):
     dtype = (dtype or "").lower()
     clean = domain.split("/")[0].split(".")[0]
 
-    if "proxy" in dtype:
+    if dtype == "proxy":
         return None, None
     if "sub" in dtype:
         return "directclients_prod", "Target_P4_Opt"
@@ -202,7 +202,7 @@ def process_domain(dom, utc):
     name = dom["Domain"].strip().rstrip("/")
     dtype = (dom.get("Domain Type", "") or "").lower()
 
-    if "proxy" in dtype:
+    if dtype == "proxy":
         return process_proxy_domain(dom, utc)
 
     emp = dom.get("EmployerId")
@@ -292,14 +292,22 @@ def build_alerts(rows, utc, ist):
     domain_coll = local["domain_postings"]["domains"]
 
     for r in rows:
+
         name = r["Domain"]
         curr_posted = r["Posted"]
         curr_queue = r["Queue"]
         curr_hr = r["Hr"]
         quota_left = r["QuotaLeft"]
 
-        raw = domain_coll.find_one({"Domain": name})
-        dtype = (raw.get("Domain Type", "") or "").lower()
+        # normalize for lookup
+        norm = name.strip().lower().rstrip("/")
+
+        raw = domain_coll.find_one({"Domain": norm})
+
+        if raw and "Domain Type" in raw:
+            dtype = raw["Domain Type"].strip().lower()
+        else:
+            dtype = ""
 
         prev = state_coll.find_one({"domain": name}) or {}
         if not prev:
@@ -312,16 +320,17 @@ def build_alerts(rows, utc, ist):
         if curr_posted == prev_posted and quota_left > 0:
             stopped.append(r)
 
-        # 2️⃣ Queue Stuck
-        if curr_queue > 0 and curr_posted == prev_posted and quota_left > 0:
-            queue_stuck.append(r)
+        # 2️⃣ Queue Stuck (only non-proxy)
+        if dtype != "proxy":
+            if curr_queue > 0 and curr_posted == prev_posted and quota_left > 0:
+                queue_stuck.append(r)
 
         # 3️⃣ Posting Drop
         if prev_hr > 0 and curr_hr < prev_hr:
             drop.append(r)
 
-        # 4️⃣ Push More Jobs – exclude proxy domains
-        if "proxy" not in dtype:
+        # 4️⃣ Push More Jobs – exclude proxy
+        if dtype != "proxy":
             if curr_queue < quota_left:
                 push_more.append(r)
 
