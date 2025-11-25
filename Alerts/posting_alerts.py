@@ -73,8 +73,8 @@ def get_remote_client(db):
         client = MongoClient(
             uri,
             serverSelectionTimeoutMS=8000,
-            connectTimeoutMS=8000,
-            socketTimeoutMS=8000,
+            connectTimeoutMS=80000,
+            socketTimeoutMS=80000,
             tls=False,
             directConnection=True
         )
@@ -88,9 +88,8 @@ def get_remote_client(db):
 
 # ===================== FETCH =====================
 def fast_fetch(col, emp, start_time, utc):
-    # Posted = total for the day (normal domains)
     q = {
-        "gpost": 5,  # keeping as-is per your current schema
+        "gpost": 5,
         "job_status": {"$ne": 3},
         "gpost_date": {"$gte": start_time, "$lt": utc}
     }
@@ -99,7 +98,6 @@ def fast_fetch(col, emp, start_time, utc):
     return list(col.find(q, {"gpost_date": 1}))
 
 def fetch_queue_count(col, emp):
-    # You said this is correct; leaving as-is
     q = {"gpost": 3, "job_status": {"$ne": 3}}
     if emp:
         q["employerId"] = emp
@@ -125,12 +123,12 @@ def compute_metrics(docs, quota, utc):
 
     return posted, hr, prev, max(0, quota - posted)
 
-# ===================== PROXY LOGIC (UNCHANGED) =====================
+# ===================== PROXY LOGIC =====================
 def process_proxy_domain(dom, utc):
 
     name = dom["Domain"].strip().rstrip("/")
     emp = dom.get("EmployerId")
-    quota = dom.get("Quota") or 5000  # fallback quota
+    quota = dom.get("Quota") or 5000
 
     db_name = dom.get("DB", "prod_jobiak_ai")
     coll_name = "jobsGoogleSubmittedLog"
@@ -208,7 +206,7 @@ def process_domain(dom, utc):
         return process_proxy_domain(dom, utc)
 
     emp = dom.get("EmployerId")
-    quota = dom.get("Quota") or 5000  # fallback quota
+    quota = dom.get("Quota") or 5000
 
     db, coll = pick_db(dtype, name)
     if not db:
@@ -220,26 +218,23 @@ def process_domain(dom, utc):
 
     try:
         client.admin.command("ping")
-    except Exception:
+    except:
         return None
 
     col = client[db][coll]
 
-    # Posted = total for current UTC day
     start_time = utc.replace(hour=0, minute=0, second=0, microsecond=0)
 
     try:
         docs = fast_fetch(col, emp, start_time, utc)
-    except Exception as e:
-        logging.error(f"fast_fetch failed for {name}: {e}")
+    except:
         return None
 
     posted, hr, prev, left = compute_metrics(docs, quota, utc)
 
     try:
         queue = fetch_queue_count(col, emp)
-    except Exception as e:
-        logging.error(f"fetch_queue_count failed for {name}: {e}")
+    except:
         queue = 0
 
     return {
@@ -252,11 +247,10 @@ def process_domain(dom, utc):
         "QuotaLeft": left
     }
 
-# ===================== STATE STORAGE (domain_postings DB) =====================
+# ===================== STATE STORAGE =====================
 def load_prev_state(domain):
     return local["domain_postings"]["domain_state"].find_one(
-        {"domain": domain},
-        {"_id": 0}
+        {"domain": domain}, {"_id": 0}
     )
 
 def save_state(row, utc):
@@ -292,8 +286,10 @@ def build_alerts(rows, utc, ist):
     stopped = []
     queue_stuck = []
     drop = []
+    push_more = []
 
     state_coll = local["domain_postings"]["domain_state"]
+    domain_coll = local["domain_postings"]["domains"]
 
     for r in rows:
         name = r["Domain"]
@@ -302,31 +298,38 @@ def build_alerts(rows, utc, ist):
         curr_hr = r["Hr"]
         quota_left = r["QuotaLeft"]
 
+        raw = domain_coll.find_one({"Domain": name})
+        dtype = (raw.get("Domain Type", "") or "").lower()
+
         prev = state_coll.find_one({"domain": name}) or {}
         if not prev:
-            # No previous state → don't alert on first run
             continue
 
         prev_posted = prev.get("posted_prev", 0)
         prev_hr = prev.get("hr_prev", 0)
-        # prev_queue = prev.get("queue_prev", 0)  # not needed in current rules
 
-        # 1️⃣ Posting Stopped: last run and current run Posted are same, and quota left
+        # 1️⃣ Posting Stopped
         if curr_posted == prev_posted and quota_left > 0:
             stopped.append(r)
 
-        # 2️⃣ Queue Stuck: queue > 0, Posted not moving, quota left
+        # 2️⃣ Queue Stuck
         if curr_queue > 0 and curr_posted == prev_posted and quota_left > 0:
             queue_stuck.append(r)
 
-        # 3️⃣ Posting Drop Than Previous Hr: Hr < PrevHr
+        # 3️⃣ Posting Drop
         if prev_hr > 0 and curr_hr < prev_hr:
             drop.append(r)
+
+        # 4️⃣ Push More Jobs – exclude proxy domains
+        if "proxy" not in dtype:
+            if curr_queue < quota_left:
+                push_more.append(r)
 
     alert_groups = {
         "Posting Stopped": stopped,
         "Queue Stuck — No Posting Flow": queue_stuck,
         "Posting Drop Than Previous Hr": drop,
+        "Push More Jobs — Queue Too Small": push_more,
     }
 
     alerts = []
@@ -381,14 +384,11 @@ def main():
 
     print_summary(results)
 
-    # Build alerts using previous state
     alerts = build_alerts(results, utc, ist)
 
-    # Save current state AFTER computing alerts (so alerts compare against previous run)
     for r in results:
         save_state(r, utc)
 
-    # Send alerts
     for cid in get_chat_ids().values():
         for a in alerts:
             send(cid, a)
