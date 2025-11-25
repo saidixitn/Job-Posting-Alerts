@@ -88,8 +88,9 @@ def get_remote_client(db):
 
 # ===================== FETCH =====================
 def fast_fetch(col, emp, start_time, utc):
+    # Posted = total for the day (normal domains)
     q = {
-        "gpost": 5,
+        "gpost": 5,  # keeping as-is per your current schema
         "job_status": {"$ne": 3},
         "gpost_date": {"$gte": start_time, "$lt": utc}
     }
@@ -98,6 +99,7 @@ def fast_fetch(col, emp, start_time, utc):
     return list(col.find(q, {"gpost_date": 1}))
 
 def fetch_queue_count(col, emp):
+    # You said this is correct; leaving as-is
     q = {"gpost": 3, "job_status": {"$ne": 3}}
     if emp:
         q["employerId"] = emp
@@ -123,7 +125,7 @@ def compute_metrics(docs, quota, utc):
 
     return posted, hr, prev, max(0, quota - posted)
 
-# ===================== PROXY LOGIC (FIXED) =====================
+# ===================== PROXY LOGIC (UNCHANGED) =====================
 def process_proxy_domain(dom, utc):
 
     name = dom["Domain"].strip().rstrip("/")
@@ -206,7 +208,7 @@ def process_domain(dom, utc):
         return process_proxy_domain(dom, utc)
 
     emp = dom.get("EmployerId")
-    quota = dom.get("Quota") or 5000  # FIXED fallback quota
+    quota = dom.get("Quota") or 5000  # fallback quota
 
     db, coll = pick_db(dtype, name)
     if not db:
@@ -218,21 +220,26 @@ def process_domain(dom, utc):
 
     try:
         client.admin.command("ping")
-    except:
+    except Exception:
         return None
 
     col = client[db][coll]
-    start_time = utc - timedelta(hours=2)  # FIXED
+
+    # Posted = total for current UTC day
+    start_time = utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
     try:
         docs = fast_fetch(col, emp, start_time, utc)
-    except:
+    except Exception as e:
+        logging.error(f"fast_fetch failed for {name}: {e}")
         return None
 
     posted, hr, prev, left = compute_metrics(docs, quota, utc)
 
     try:
         queue = fetch_queue_count(col, emp)
-    except:
+    except Exception as e:
+        logging.error(f"fetch_queue_count failed for {name}: {e}")
         queue = 0
 
     return {
@@ -244,6 +251,27 @@ def process_domain(dom, utc):
         "Queue": queue,
         "QuotaLeft": left
     }
+
+# ===================== STATE STORAGE (domain_postings DB) =====================
+def load_prev_state(domain):
+    return local["domain_postings"]["domain_state"].find_one(
+        {"domain": domain},
+        {"_id": 0}
+    )
+
+def save_state(row, utc):
+    doc = {
+        "domain": row["Domain"],
+        "posted_prev": row["Posted"],
+        "hr_prev": row["Hr"],
+        "queue_prev": row["Queue"],
+        "updatedAt": utc
+    }
+    local["domain_postings"]["domain_state"].update_one(
+        {"domain": row["Domain"]},
+        {"$set": doc},
+        upsert=True
+    )
 
 # ===================== PRINT =====================
 def print_summary(rows):
@@ -258,22 +286,47 @@ def print_summary(rows):
 
 # ===================== ALERTS =====================
 def build_alerts(rows, utc, ist):
-
     if quiet_hours(ist):
         return []
 
-    stopped = [r for r in rows if r["Hr"] == 0 and r["Prev"] > 0]
-    queue_stuck = [r for r in rows if r["Hr"] == 0 and r["Queue"] > 0 and r["QuotaLeft"] > 0]
-    slowdown = [r for r in rows if r["Prev"] > 20 and r["Hr"] < r["Prev"] * 0.6]
-    not_started = [r for r in rows if r["Posted"] == 0]
-    no_queue = [r for r in rows if r["Queue"] == 0 and r["QuotaLeft"] > 0]
+    stopped = []
+    queue_stuck = []
+    drop = []
+
+    state_coll = local["domain_postings"]["domain_state"]
+
+    for r in rows:
+        name = r["Domain"]
+        curr_posted = r["Posted"]
+        curr_queue = r["Queue"]
+        curr_hr = r["Hr"]
+        quota_left = r["QuotaLeft"]
+
+        prev = state_coll.find_one({"domain": name}) or {}
+        if not prev:
+            # No previous state → don't alert on first run
+            continue
+
+        prev_posted = prev.get("posted_prev", 0)
+        prev_hr = prev.get("hr_prev", 0)
+        # prev_queue = prev.get("queue_prev", 0)  # not needed in current rules
+
+        # 1️⃣ Posting Stopped: last run and current run Posted are same, and quota left
+        if curr_posted == prev_posted and quota_left > 0:
+            stopped.append(r)
+
+        # 2️⃣ Queue Stuck: queue > 0, Posted not moving, quota left
+        if curr_queue > 0 and curr_posted == prev_posted and quota_left > 0:
+            queue_stuck.append(r)
+
+        # 3️⃣ Posting Drop Than Previous Hr: Hr < PrevHr
+        if prev_hr > 0 and curr_hr < prev_hr:
+            drop.append(r)
 
     alert_groups = {
         "Posting Stopped": stopped,
         "Queue Stuck — No Posting Flow": queue_stuck,
-        "Posting Drop > 40%": slowdown,
-        "No Postings Started": not_started,
-        "No Queue but Quota Left": no_queue,
+        "Posting Drop Than Previous Hr": drop,
     }
 
     alerts = []
@@ -290,7 +343,7 @@ def build_alerts(rows, utc, ist):
         for r in items:
             msg += (
                 f"• <b>{r['Domain']}</b>\n"
-                f"  Hr: {r['Hr']} | Prev: {r['Prev']}\n"
+                f"  Hr: {r['Hr']} | PrevHr: {r['Prev']}\n"
                 f"  Queue: {r['Queue']} | Left: {r['QuotaLeft']}\n\n"
             )
 
@@ -315,7 +368,7 @@ def main():
                 r = f.result(timeout=THREAD_TIMEOUT)
                 if r:
                     results.append(r)
-            except TimeoutError:
+            except FutureTimeout:
                 print("⚠️ Thread timeout for one domain — skipping.")
             except Exception as e:
                 logging.error(f"Thread error: {e}")
@@ -328,7 +381,14 @@ def main():
 
     print_summary(results)
 
+    # Build alerts using previous state
     alerts = build_alerts(results, utc, ist)
+
+    # Save current state AFTER computing alerts (so alerts compare against previous run)
+    for r in results:
+        save_state(r, utc)
+
+    # Send alerts
     for cid in get_chat_ids().values():
         for a in alerts:
             send(cid, a)
