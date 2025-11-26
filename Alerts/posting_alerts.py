@@ -289,6 +289,11 @@ def build_alerts(rows, utc, ist):
     if quiet_hours(ist):
         return []
 
+    # ==============================
+    # TOTAL POSTED (all domains)
+    # ==============================
+    total_posted = sum(r["Posted"] for r in rows)
+
     stopped = []
     queue_stuck = []
     drop = []
@@ -304,7 +309,7 @@ def build_alerts(rows, utc, ist):
         curr_posted = r["Posted"]
         curr_queue = r["Queue"]
         curr_hr = r["Hr"]
-        quota_left = r["QuotaLeft"]  # = quota - posted (today)
+        quota_left = r["QuotaLeft"]
 
         # normalize
         norm = name.strip().lower().rstrip("/")
@@ -319,30 +324,32 @@ def build_alerts(rows, utc, ist):
         if curr_posted == prev_posted and quota_left > 0:
             stopped.append(r)
 
-        # 2️⃣ Queue Stuck (non-proxy)
+        # 2️⃣ Queue Stuck (Non-proxy)
         if dtype != "proxy":
             if curr_queue > 0 and curr_posted == prev_posted and quota_left > 0:
                 queue_stuck.append(r)
 
-        # 3️⃣ Posting Drop (prev hour > this hour)
+        # 3️⃣ Posting Drop — ONLY if drop > 500
         if prev_hr > 0 and curr_hr < prev_hr:
-            drop.append(r)
+            drop_diff = prev_hr - curr_hr
+            if drop_diff > 500:
+                r["DropDiff"] = drop_diff
+                drop.append(r)
 
-        # 4️⃣ Push More Jobs — NOW: (quota - posted) - queue
+        # 4️⃣ Push More Jobs
         if dtype != "proxy":
-            # remaining capacity today
-            left_today = quota_left          # quota - posted
-            # how many more to load into queue to utilize that capacity
+            left_today = quota_left
             push_needed = max(0, left_today - curr_queue)
 
             if push_needed > 0:
                 r["PushAmountK"] = fmt_k(push_needed)
                 push_more.append(r)
 
-        # 5️⃣ Posting stopped this hour
+        # 5️⃣ Posting Stopped This Hour
         if prev_hr > 0 and curr_hr == 0:
             hour_stopped.append(r)
 
+    # Grouping alerts
     alert_groups = {
         "Posting Stopped": stopped,
         "Queue Stuck — No Posting Flow": queue_stuck,
@@ -356,18 +363,28 @@ def build_alerts(rows, utc, ist):
         if not items:
             continue
 
+        # ==============================
+        # HEADER (now includes total posted)
+        # ==============================
         msg = (
             f"⚠️ <b>{title}</b>\n"
             f"UTC {utc:%H:%M} | IST {ist:%H:%M}\n"
-            f"<b>{len(items)} domain(s) affected</b>\n\n"
+            f"<b>{len(items)} domain(s) affected</b>\n"
+            f"📦 Total Posted Today: <b>{fmt_k(total_posted)}</b>\n\n"
         )
 
+        # ==============================
+        # PER-DOMAIN DETAIL
+        # ==============================
         for r in items:
             msg += f"• <b>{r['Domain']}</b>\n"
             msg += f"  Hr: {r['Hr']} | PrevHr: {r['Prev']}\n"
             msg += f"  Queue: {fmt_k(r['Queue'])}\n"
 
-            if 'PushAmountK' in r:
+            if "DropDiff" in r:
+                msg += f"  Drop: {fmt_k(r['DropDiff'])}\n"
+
+            if "PushAmountK" in r:
                 msg += f"  Push: {r['PushAmountK']} jobs\n"
 
             msg += f"  Left today: {fmt_k(r['QuotaLeft'])}\n\n"
