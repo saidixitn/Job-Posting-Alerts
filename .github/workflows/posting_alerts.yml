@@ -6,49 +6,64 @@ on:
   workflow_dispatch:
 
 jobs:
+
+  # -----------------------------------------------------------
+  # 1. HELPER JOB — computes whether it's quiet hours
+  # -----------------------------------------------------------
+  check-quiet-hours:
+    runs-on: ubuntu-latest
+    outputs:
+      quiet: ${{ steps.timecheck.outputs.quiet }}
+    steps:
+      - name: Determine IST Quiet Hours
+        id: timecheck
+        run: |
+          IST=$(TZ="Asia/Kolkata" date +%H%M)
+          echo "IST time: $IST"
+
+          # Quiet hours: 02:30 - 12:30  => 0230 - 1230
+          if [ "$IST" -ge 0230 ] && [ "$IST" -lt 1230 ]; then
+            echo "quiet=true" >> $GITHUB_OUTPUT
+          else
+            echo "quiet=false" >> $GITHUB_OUTPUT
+          fi
+
+  # -----------------------------------------------------------
+  # 2. MAIN JOB — runs ONLY if quiet=false
+  # -----------------------------------------------------------
   run-alerts:
     runs-on: ubuntu-latest
-
+    needs: check-quiet-hours
+    if: needs.check-quiet-hours.outputs.quiet == 'false'   # <--- THIS IS THE MAGIC
     steps:
 
-    - name: Quiet Hours Check (IST)
-      run: |
-        IST=$(TZ="Asia/Kolkata" date +%H%M)
-        echo "IST=$IST"
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-        # Quiet hours: 02:30 → 12:30
-        if [ "$IST" -ge 0230 ] && [ "$IST" -lt 1230 ]; then
-          echo "⏳ Quiet hours — skipping workflow BEFORE setup."
-          exit 78   # <--- THIS cancels the ENTIRE job
-        fi
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          cd Alerts
+          pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.11"
+      - name: Run Posting Alerts Script
+        env:
+          LOCAL_MONGO_URI: ${{ secrets.LOCAL_MONGO_URI }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_IDS_JSON: ${{ secrets.CHAT_IDS_JSON }}
+        run: |
+          cd Alerts
+          python posting_alerts.py
 
-    - name: Install dependencies
-      run: |
-        cd Alerts
-        pip install --upgrade pip
-        pip install -r requirements.txt
-
-    - name: Run Posting Alerts Script
-      env:
-        LOCAL_MONGO_URI: ${{ secrets.LOCAL_MONGO_URI }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        CHAT_IDS_JSON: ${{ secrets.CHAT_IDS_JSON }}
-      run: |
-        cd Alerts
-        python posting_alerts.py
-
-    - name: Debug Info (on failure)
-      if: failure()
-      run: |
-        echo "=== Directory Tree ==="
-        ls -R .
-        echo "=== Python Version ==="
-        python --version
+      - name: Debug Info (on failure)
+        if: failure()
+        run: |
+          echo "=== Directory Tree ==="
+          ls -R .
+          echo "=== Python Version ==="
+          python --version
