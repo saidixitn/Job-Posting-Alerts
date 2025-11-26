@@ -7,9 +7,6 @@ on:
 
 jobs:
 
-  # -----------------------------------------------------------
-  # 1. HELPER JOB — computes whether it's quiet hours
-  # -----------------------------------------------------------
   check-quiet-hours:
     runs-on: ubuntu-latest
     outputs:
@@ -19,7 +16,7 @@ jobs:
         id: timecheck
         run: |
           IST=$(TZ="Asia/Kolkata" date +%H%M)
-          echo "IST time: $IST"
+          echo "IST: $IST"
 
           if [ "$IST" -ge 0230 ] && [ "$IST" -lt 1230 ]; then
             echo "quiet=true" >> $GITHUB_OUTPUT
@@ -27,30 +24,19 @@ jobs:
             echo "quiet=false" >> $GITHUB_OUTPUT
           fi
 
-  # -----------------------------------------------------------
-  # 2. MAIN JOB — runs ONLY if quiet=false
-  # -----------------------------------------------------------
   run-alerts:
     runs-on: ubuntu-latest
     needs: check-quiet-hours
     if: needs.check-quiet-hours.outputs.quiet == 'false'
-
     steps:
 
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      # -------------------------------------------------------
-      # FIX: Write chatids.json from secret
-      # -------------------------------------------------------
-      - name: Write chat ids file
-        run: |
-          echo '${{ secrets.CHAT_IDS_JSON }}' > chatids.json
 
       - name: Install dependencies
         run: |
@@ -62,14 +48,13 @@ jobs:
         env:
           LOCAL_MONGO_URI: ${{ secrets.LOCAL_MONGO_URI }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_IDS_JSON: ${{ secrets.CHAT_IDS_JSON }}
         run: |
           cd Alerts
           python posting_alerts.py
 
-      - name: Debug Info (on failure)
+      - name: Debug Info on fail
         if: failure()
         run: |
-          echo "=== Directory Tree ==="
+          echo "=== Debug Files ==="
           ls -R .
-          echo "=== Python Version ==="
-          python --version
