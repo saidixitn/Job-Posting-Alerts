@@ -94,8 +94,8 @@ def get_remote_client(db):
         client = MongoClient(
             uri,
             serverSelectionTimeoutMS=10000,
-            tls=True,
-            directConnection=False
+            tls=False,
+            directConnection=True
         )
         client.admin.command("ping")
     except Exception as e:
