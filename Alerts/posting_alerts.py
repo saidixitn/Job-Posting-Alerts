@@ -1,21 +1,25 @@
-import logging, json, os
+import logging, os
 from datetime import datetime, timedelta, timezone
 from pymongo import MongoClient
 import requests
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
-# ===================== CONFIG =====================
+# ============================================================
+# CONFIG
+# ============================================================
 LOCAL_MONGO_URI = os.getenv("LOCAL_MONGO_URI", "mongodb://localhost:27017/")
 BOT = os.getenv("TELEGRAM_BOT_TOKEN", "")
 MAX_WORKERS = 8
-THREAD_TIMEOUT = 20  # seconds per domain
+THREAD_TIMEOUT = 20
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [INFO] %(message)s")
 
 local = MongoClient(LOCAL_MONGO_URI, serverSelectionTimeoutMS=5000)
 CLIENT_CACHE = {}
 
-# ===================== TELEGRAM SEND =====================
+# ============================================================
+# TELEGRAM SEND
+# ============================================================
 def send(cid, text):
     try:
         requests.post(
@@ -26,14 +30,15 @@ def send(cid, text):
     except Exception as e:
         logging.error(f"Telegram send failed: {e}")
 
-# ===================== TIME HELPERS =====================
+# ============================================================
+# TIME
+# ============================================================
 def now_times():
     utc = datetime.now(timezone.utc)
     ist = utc.astimezone(timezone(timedelta(hours=5, minutes=30)))
     return utc, ist
 
 def quiet_hours(ist):
-    # Quiet hours: 02:30 IST → 12:30 IST
     start = ist.replace(hour=2, minute=30, second=0, microsecond=0)
     end   = ist.replace(hour=12, minute=30, second=0, microsecond=0)
     return start <= ist < end
@@ -41,15 +46,14 @@ def quiet_hours(ist):
 def make_aware(dt):
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
-# ===================== CHAT IDS =====================
-# ===================== CHAT IDS (MONGO) =====================
+# ============================================================
+# CHAT IDS (Mongo-based)
+# ============================================================
 def get_chat_ids():
-    """Return a list of all chat IDs from Mongo."""
     rows = list(local["domain_postings"]["chat_ids"].find({}, {"_id": 0, "chat_id": 1}))
     return [r["chat_id"] for r in rows]
 
 def get_admin_chat_id():
-    """Return admin chat ID from Mongo."""
     row = local["domain_postings"]["chat_ids"].find_one(
         {"role": "admin"},
         {"_id": 0, "chat_id": 1}
@@ -59,7 +63,9 @@ def get_admin_chat_id():
         return None
     return row["chat_id"]
 
-# ===================== DB ROUTING =====================
+# ============================================================
+# DB ROUTING
+# ============================================================
 def pick_db(dtype, domain):
     dtype = (dtype or "").lower()
     clean = domain.split("/")[0].split(".")[0]
@@ -70,7 +76,9 @@ def pick_db(dtype, domain):
         return "directclients_prod", "Target_P4_Opt"
     return f"{clean}_prod", "Target_P4_Opt"
 
-# ===================== FIXED MONGO CONNECTION =====================
+# ============================================================
+# FIXED MONGO CONNECTION (Atlas-safe)
+# ============================================================
 def get_remote_client(db):
     if db in CLIENT_CACHE:
         return CLIENT_CACHE[db]
@@ -81,17 +89,13 @@ def get_remote_client(db):
         return None
 
     uri = rec["mongo_uri"].strip()
-    if uri.endswith("?"):
-        uri = uri[:-1]
 
     try:
         client = MongoClient(
             uri,
-            serverSelectionTimeoutMS=8000,
-            connectTimeoutMS=80000,
-            socketTimeoutMS=80000,
-            tls=False,
-            directConnection=True
+            serverSelectionTimeoutMS=10000,
+            tls=True,
+            directConnection=False
         )
         client.admin.command("ping")
     except Exception as e:
@@ -101,7 +105,9 @@ def get_remote_client(db):
     CLIENT_CACHE[db] = client
     return client
 
-# ===================== FETCH =====================
+# ============================================================
+# FETCH
+# ============================================================
 def fast_fetch(col, emp, start_time, utc):
     q = {
         "gpost": 5,
@@ -118,7 +124,9 @@ def fetch_queue_count(col, emp):
         q["employerId"] = emp
     return col.count_documents(q)
 
-# ===================== METRICS =====================
+# ============================================================
+# METRICS
+# ============================================================
 def compute_metrics(docs, quota, utc):
     hr1_start = utc.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
     hr2_start = hr1_start - timedelta(hours=1)
@@ -138,9 +146,10 @@ def compute_metrics(docs, quota, utc):
 
     return posted, hr, prev, max(0, quota - posted)
 
-# ===================== PROXY LOGIC =====================
+# ============================================================
+# PROXY LOGIC
+# ============================================================
 def process_proxy_domain(dom, utc):
-
     name = dom["Domain"].strip().rstrip("/")
     emp = dom.get("EmployerId")
     quota = dom.get("Quota") or 5000
@@ -155,7 +164,6 @@ def process_proxy_domain(dom, utc):
     col = client[db_name][coll_name]
 
     start_time = utc - timedelta(hours=2)
-
     match_stage = {"createdAt": {"$gte": start_time, "$lt": utc}}
     if emp:
         match_stage["employerId"] = emp
@@ -163,19 +171,12 @@ def process_proxy_domain(dom, utc):
     try:
         pipeline = [
             {"$match": match_stage},
-            {
-                "$group": {
-                    "_id": {
-                        "hour": {
-                            "$dateToString": {
-                                "format": "%Y-%m-%d %H",
-                                "date": "$createdAt"
-                            }
-                        }
-                    },
-                    "count": {"$sum": 1}
-                }
-            }
+            {"$group": {
+                "_id": {
+                    "hour": {"$dateToString": {"format": "%Y-%m-%d %H", "date": "$createdAt"}}
+                },
+                "count": {"$sum": 1}
+            }}
         ]
         aggr = list(col.aggregate(pipeline))
     except Exception as e:
@@ -187,20 +188,16 @@ def process_proxy_domain(dom, utc):
     hr1_start = utc.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
     hr2_start = hr1_start - timedelta(hours=1)
 
+    hr = prev = 0
     hr1_key = hr1_start.strftime("%Y-%m-%d %H")
     hr2_key = hr2_start.strftime("%Y-%m-%d %H")
 
-    hr = prev = 0
-
     for a in aggr:
         hour = a["_id"]["hour"]
-        count = a["count"]
         if hour == hr1_key:
-            hr = count
+            hr = a["count"]
         elif hour == hr2_key:
-            prev = count
-
-    left = max(0, quota - posted)
+            prev = a["count"]
 
     return {
         "Domain": name,
@@ -209,10 +206,12 @@ def process_proxy_domain(dom, utc):
         "Prev": prev,
         "Diff": hr - prev,
         "Queue": 0,
-        "QuotaLeft": left
+        "QuotaLeft": max(0, quota - posted)
     }
 
-# ===================== NORMAL DOMAIN LOGIC =====================
+# ============================================================
+# NORMAL DOMAIN LOGIC
+# ============================================================
 def process_domain(dom, utc):
     name = dom["Domain"].strip().rstrip("/")
     dtype = (dom.get("Domain Type", "") or "").lower()
@@ -262,45 +261,30 @@ def process_domain(dom, utc):
         "QuotaLeft": left
     }
 
-# ===================== STATE STORAGE =====================
-def load_prev_state(domain):
-    return local["domain_postings"]["domain_state"].find_one(
-        {"domain": domain}, {"_id": 0}
-    )
-
+# ============================================================
+# STATE STORAGE
+# ============================================================
 def save_state(row, utc):
-    doc = {
-        "domain": row["Domain"],
-        "posted_prev": row["Posted"],
-        "hr_prev": row["Hr"],
-        "queue_prev": row["Queue"],
-        "updatedAt": utc
-    }
     local["domain_postings"]["domain_state"].update_one(
         {"domain": row["Domain"]},
-        {"$set": doc},
+        {"$set": {
+            "posted_prev": row["Posted"],
+            "hr_prev": row["Hr"],
+            "queue_prev": row["Queue"],
+            "updatedAt": utc
+        }},
         upsert=True
     )
 
-# ===================== NUMBER FORMATTER =====================
+# ============================================================
+# FORMATTER (k-format)
+# ============================================================
 def fmt_k(n):
-    """Format numbers as Xk (1 decimal)."""
-    return f"{round(n / 1000, 1)}k"
+    return f"{round(n/1000, 1)}k"
 
-
-# ===================== PRINT =====================
-def print_summary(rows):
-    print("\n======== RESULTS ========\n")
-    for r in rows:
-        print(f"{r['Domain']}")
-        print(f"  Posted: {fmt_k(r['Posted'])}")
-        print(f"  Hr: {fmt_k(r['Hr'])} | Prev: {fmt_k(r['Prev'])} | Diff: {fmt_k(r['Diff'])}")
-        print(f"  Queue: {fmt_k(r['Queue'])} | Left: {fmt_k(r['QuotaLeft'])}")
-        print("------------------------------------")
-    print("==========================\n")
-
-
-# ===================== ALERTS =====================
+# ============================================================
+# ALERTS
+# ============================================================
 def build_alerts(rows, utc, ist):
     if quiet_hours(ist):
         return []
@@ -315,46 +299,42 @@ def build_alerts(rows, utc, ist):
     domain_coll = local["domain_postings"]["domains"]
 
     for r in rows:
-
         name = r["Domain"]
         curr_posted = r["Posted"]
         curr_queue = r["Queue"]
         curr_hr = r["Hr"]
         quota_left = r["QuotaLeft"]
 
-        # normalize
-        norm = name.strip().lower().rstrip("/")
+        norm = name.strip().lower()
         raw = domain_coll.find_one({"Domain": norm})
-
-        dtype = raw.get("Domain Type", "").strip().lower() if raw else ""
+        dtype = raw.get("Domain Type", "").lower() if raw else ""
 
         prev = state_coll.find_one({"domain": name}) or {}
         prev_posted = prev.get("posted_prev", 0)
         prev_hr = prev.get("hr_prev", 0)
 
-        # 1️⃣ Posting Stopped
+        # Posting stopped
         if curr_posted == prev_posted and quota_left > 0:
             stopped.append(r)
 
-        # 2️⃣ Queue Stuck (non-proxy)
-        if dtype != "proxy":
-            if curr_queue > 0 and curr_posted == prev_posted and quota_left > 0:
-                queue_stuck.append(r)
+        # Queue stuck
+        if dtype != "proxy" and curr_queue > 0 and curr_posted == prev_posted:
+            queue_stuck.append(r)
 
-        # 3️⃣ Posting Drop (prev hour > this hour)
+        # Posting drop
         if prev_hr > 0 and curr_hr < prev_hr:
             drop.append(r)
 
-        # 4️⃣ Push More Jobs (special new rule)
+        # Push more = quota - posted
         if dtype != "proxy":
-            total_done = curr_posted + curr_queue
-            new_left = max(0, (quota_left + curr_posted) - total_done)
+            push_needed = max(0, (curr_posted + quota_left) - curr_posted)
+            push_needed = quota_left
 
-            if new_left > 0:
-                r["PushAmountK"] = fmt_k(new_left)
+            if push_needed > 0:
+                r["PushAmountK"] = fmt_k(push_needed)
                 push_more.append(r)
 
-        # 5️⃣ Posting stopped this hour (NEW)
+        # Stopped this hour
         if prev_hr > 0 and curr_hr == 0:
             hour_stopped.append(r)
 
@@ -363,7 +343,7 @@ def build_alerts(rows, utc, ist):
         "Queue Stuck — No Posting Flow": queue_stuck,
         "Posting Drop Than Previous Hr": drop,
         "Push More Jobs": push_more,
-        "Posting Stopped — No Postings This Hour": hour_stopped,
+        "Posting Stopped — No Postings This Hour": hour_stopped
     }
 
     alerts = []
@@ -379,29 +359,29 @@ def build_alerts(rows, utc, ist):
 
         for r in items:
             msg += f"• <b>{r['Domain']}</b>\n"
-            msg += f"  Hr: {fmt_k(r['Hr'])} | PrevHr: {fmt_k(r['Prev'])}\n"
+            msg += f"  Hr: {r['Hr']} | PrevHr: {r['Prev']}\n"
             msg += f"  Queue: {fmt_k(r['Queue'])}\n"
 
-            if 'PushAmountK' in r:
+            if "PushAmountK" in r:
                 msg += f"  Push: {r['PushAmountK']} jobs\n"
 
-            msg += f"  Left: {fmt_k(r['QuotaLeft'])}\n\n"
+            msg += f"  Left today: {fmt_k(r['QuotaLeft'])}\n\n"
 
         alerts.append(msg)
 
     return alerts
 
-# ===================== MAIN =====================
+# ============================================================
+# MAIN
+# ============================================================
 def main():
     start = datetime.now()
     utc, ist = now_times()
 
-    # ========== QUIET HOURS CHECK ==========
     if quiet_hours(ist):
         print(f"⏳ Quiet hours (IST {ist:%H:%M}) — Skipping execution.")
         logging.info("Quiet hours — Script stopped before running.")
         return
-    # =======================================
 
     domains = list(local["domain_postings"]["domains"].find({}, {"_id": 0}))
     print("Loaded domains:", len(domains))
@@ -415,10 +395,8 @@ def main():
                 r = f.result(timeout=THREAD_TIMEOUT)
                 if r:
                     results.append(r)
-            except FutureTimeout:
-                print("⚠️ Thread timeout for one domain — skipping.")
-            except Exception as e:
-                logging.error(f"Thread error: {e}")
+            except:
+                pass
 
     if not results:
         print("❌ No data.")
@@ -426,9 +404,7 @@ def main():
 
     results.sort(key=lambda x: x["Posted"], reverse=True)
 
-    print_summary(results)
-
-    # ========= SEND POSTING SUMMARY ONLY TO ADMIN =========
+    # SEND SUMMARY TO ADMIN
     admin_cid = get_admin_chat_id()
     if admin_cid:
         summary = "📊 <b>Posting Summary</b>\n\n"
@@ -436,26 +412,22 @@ def main():
             summary += (
                 f"• <b>{r['Domain']}</b>\n"
                 f"  Posted: {fmt_k(r['Posted'])}\n"
-                f"  Hr: {fmt_k(r['Hr'])} | PrevHr: {fmt_k(r['Prev'])}\n"
+                f"  Hr: {r['Hr']} | PrevHr: {r['Prev']}\n"
                 f"  Queue: {fmt_k(r['Queue'])} | Left: {fmt_k(r['QuotaLeft'])}\n\n"
             )
         send(admin_cid, summary)
-    else:
-        logging.error("Admin not found in chatids.json")
 
     alerts = build_alerts(results, utc, ist)
 
     for r in results:
         save_state(r, utc)
 
-    # alerts still go to ALL chat IDs
     for cid in get_chat_ids():
         for a in alerts:
             send(cid, a)
 
-    print(f"\nDone in {(datetime.now() - start).total_seconds():.2f}s\n")
+    print(f"\nDone in {(datetime.now()-start).total_seconds():.2f}s\n")
     logging.info("Run OK.")
-
 
 if __name__ == "__main__":
     main()

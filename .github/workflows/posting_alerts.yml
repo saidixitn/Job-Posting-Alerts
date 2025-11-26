@@ -7,16 +7,15 @@ on:
 
 jobs:
 
-  check-quiet-hours:
+  check-quiet:
     runs-on: ubuntu-latest
     outputs:
-      quiet: ${{ steps.timecheck.outputs.quiet }}
+      quiet: ${{ steps.qh.outputs.quiet }}
     steps:
-      - name: Determine IST Quiet Hours
-        id: timecheck
+      - name: Check Quiet Hours IST
+        id: qh
         run: |
           IST=$(TZ="Asia/Kolkata" date +%H%M)
-          echo "IST: $IST"
 
           if [ "$IST" -ge 0230 ] && [ "$IST" -lt 1230 ]; then
             echo "quiet=true" >> $GITHUB_OUTPUT
@@ -26,15 +25,13 @@ jobs:
 
   run-alerts:
     runs-on: ubuntu-latest
-    needs: check-quiet-hours
-    if: needs.check-quiet-hours.outputs.quiet == 'false'
+    needs: check-quiet
+    if: needs.check-quiet.outputs.quiet == 'false'
     steps:
 
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -44,17 +41,10 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Posting Alerts Script
+      - name: Run Posting Alerts
         env:
           LOCAL_MONGO_URI: ${{ secrets.LOCAL_MONGO_URI }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_IDS_JSON: ${{ secrets.CHAT_IDS_JSON }}
         run: |
           cd Alerts
           python posting_alerts.py
-
-      - name: Debug Info on fail
-        if: failure()
-        run: |
-          echo "=== Debug Files ==="
-          ls -R .
