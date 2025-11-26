@@ -2,7 +2,7 @@ name: Posting Alerts
 
 on:
   schedule:
-    - cron: "0 * * * *"   # Runs every hour (UTC)
+    - cron: "0 * * * *"   # Every hour (UTC)
   workflow_dispatch:
 
 jobs:
@@ -12,28 +12,22 @@ jobs:
     steps:
 
     # -----------------------------
-    # 0. Quiet Hours Check (IST)
+    # 0. HARD STOP DURING QUIET HOURS (IST)
     # -----------------------------
-    - name: Check IST Quiet Hours
-      id: quiet
+    - name: Quiet Hours Check (IST)
       run: |
         IST_TIME=$(TZ="Asia/Kolkata" date +%H:%M)
         echo "Current IST: $IST_TIME"
 
-        if [[ "$IST_TIME" > "02:30" && "$IST_TIME" < "12:30" ]]; then
-          echo "quiet_now=true" >> $GITHUB_ENV
-        else
-          echo "quiet_now=false" >> $GITHUB_ENV
-        fi
+        # Convert HH:MM to pure number for comparison
+        IST_NUM=$(echo $IST_TIME | tr -d ':')
 
-    # -----------------------------
-    # HARD STOP IF QUIET HOURS
-    # -----------------------------
-    - name: Stop During Quiet Hours
-      if: env.quiet_now == 'true'
-      run: |
-        echo "⏳ Quiet hours — skipping entire workflow."
-        exit 0
+        # Quiet hours: 02:30 → 12:30
+        # That is 0230 → 1230 numerically
+        if [ "$IST_NUM" -ge 0230 ] && [ "$IST_NUM" -lt 1230 ]; then
+          echo "⏳ Quiet hours — stopping workflow BEFORE setup."
+          exit 0
+        fi
 
     # -----------------------------
     # 1. Checkout Repository
