@@ -163,40 +163,67 @@ def process_proxy_domain(dom, utc):
 
     col = client[db_name][coll_name]
 
+    # DAY START
     start_time = utc.replace(hour=0, minute=0, second=0, microsecond=0)
-    match_stage = {"createdAt": {"$gte": start_time, "$lt": utc}}
+
+    # MATCH STAGE
+    match_stage = {
+        "createdAt": {"$gte": start_time, "$lt": utc}
+    }
     if emp:
         match_stage["employerId"] = emp
 
+    # PIPELINE exactly matching your query
+    pipeline = [
+        {"$match": match_stage},
+        {"$group": {
+            "_id": {
+                "employerId": "$employerId",
+                "date": {"$dateToString": {"format": "%Y-%m-%d", "date": "$createdAt"}}
+            },
+            "count": {"$sum": 1}
+        }},
+        {"$sort": {"_id.date": 1}}
+    ]
+
     try:
-        pipeline = [
-            {"$match": match_stage},
-            {"$group": {
-                "_id": {
-                    "hour": {"$dateToString": {"format": "%Y-%m-%d %H", "date": "$createdAt"}}
-                },
-                "count": {"$sum": 1}
-            }}
-        ]
-        aggr = list(col.aggregate(pipeline))
+        day_aggr = list(col.aggregate(pipeline))
     except Exception as e:
         logging.error(f"Proxy aggregation failed for {name}: {e}")
         return None
 
-    posted = sum(a["count"] for a in aggr)
+    # Total posted today = sum of date-level counts
+    posted = sum(x["count"] for x in day_aggr)
+
+    # Now compute hourly HR / PREV-HR
+    # Use hourly grouping separate from daily
+    hourly_pipeline = [
+        {"$match": {"createdAt": {"$gte": utc - timedelta(hours=2), "$lt": utc},
+                    **({"employerId": emp} if emp else {})}},
+        {"$group": {
+            "_id": {
+                "hour": {"$dateToString": {"format": "%Y-%m-%d %H", "date": "$createdAt"}}
+            },
+            "count": {"$sum": 1}
+        }}
+    ]
+
+    try:
+        hourly_aggr = list(col.aggregate(hourly_pipeline))
+    except:
+        hourly_aggr = []
 
     hr1_start = utc.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
     hr2_start = hr1_start - timedelta(hours=1)
 
-    hr = prev = 0
     hr1_key = hr1_start.strftime("%Y-%m-%d %H")
     hr2_key = hr2_start.strftime("%Y-%m-%d %H")
 
-    for a in aggr:
-        hour = a["_id"]["hour"]
-        if hour == hr1_key:
+    hr = prev = 0
+    for a in hourly_aggr:
+        if a["_id"]["hour"] == hr1_key:
             hr = a["count"]
-        elif hour == hr2_key:
+        elif a["_id"]["hour"] == hr2_key:
             prev = a["count"]
 
     return {
@@ -317,8 +344,8 @@ def build_alerts(rows, utc, ist):
         prev_posted = prev.get("posted_prev", 0)
         prev_hr = prev.get("hr_prev", 0)
 
-        # 1) Posting Stopped (Today)
-        if curr_posted == prev_posted and quota_left > 0:
+        # 1) Posting Stopped (Today) — ONLY when nothing posted in this hour
+        if curr_posted == prev_posted and curr_hr == 0 and quota_left > 0:
             posting_stopped.append(r)
 
         # 2) Queue Stuck
