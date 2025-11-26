@@ -42,18 +42,22 @@ def make_aware(dt):
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 # ===================== CHAT IDS =====================
+# ===================== CHAT IDS (MONGO) =====================
 def get_chat_ids():
-    if os.path.exists("chatids.json"):
-        return json.load(open("chatids.json"))
-    return {}
+    """Return a list of all chat IDs from Mongo."""
+    rows = list(local["domain_postings"]["chat_ids"].find({}, {"_id": 0, "chat_id": 1}))
+    return [r["chat_id"] for r in rows]
 
 def get_admin_chat_id():
-    ids = get_chat_ids()
-    admin = ids.get("SaiDixit")
-
-    if not admin:
-        logging.error("SaiDixit chat ID missing in chatids.json")
-    return admin
+    """Return admin chat ID from Mongo."""
+    row = local["domain_postings"]["chat_ids"].find_one(
+        {"role": "admin"},
+        {"_id": 0, "chat_id": 1}
+    )
+    if not row:
+        logging.error("❌ No admin found in domain_postings.chat_ids")
+        return None
+    return row["chat_id"]
 
 
 # ===================== DB ROUTING =====================
