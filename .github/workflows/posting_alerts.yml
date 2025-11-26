@@ -2,7 +2,7 @@ name: Posting Alerts
 
 on:
   schedule:
-    - cron: "0 * * * *"   # Every hour (UTC)
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -11,57 +11,31 @@ jobs:
 
     steps:
 
-    # ---------------------------------------------------------
-    # 0. QUIET HOURS CHECK (IST)
-    # ---------------------------------------------------------
-    - name: Quiet Hours Check
-      id: qh
+    - name: Quiet Hours Check (IST)
       run: |
         IST=$(TZ="Asia/Kolkata" date +%H%M)
         echo "IST=$IST"
 
-        # Quiet hours: 02:30 (0230) → 12:30 (1230)
+        # Quiet hours: 02:30 → 12:30
         if [ "$IST" -ge 0230 ] && [ "$IST" -lt 1230 ]; then
-          echo "inside_quiet=true" >> $GITHUB_OUTPUT
-        else
-          echo "inside_quiet=false" >> $GITHUB_OUTPUT
+          echo "⏳ Quiet hours — skipping workflow BEFORE setup."
+          exit 78   # <--- THIS cancels the ENTIRE job
         fi
 
-    # ---------------------------------------------------------
-    # 1. STOP JOB IF INSIDE QUIET HOURS
-    # ---------------------------------------------------------
-    - name: Stop During Quiet Hours
-      if: steps.qh.outputs.inside_quiet == 'true'
-      run: |
-        echo "⏳ Quiet hours — stopping workflow BEFORE setup."
-        exit 0
-
-    # ---------------------------------------------------------
-    # 2. Checkout Repository
-    # ---------------------------------------------------------
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # ---------------------------------------------------------
-    # 3. Setup Python
-    # ---------------------------------------------------------
-    - name: Set up Python
+    - name: Setup Python
       uses: actions/setup-python@v5
       with:
         python-version: "3.11"
 
-    # ---------------------------------------------------------
-    # 4. Install Dependencies
-    # ---------------------------------------------------------
     - name: Install dependencies
       run: |
         cd Alerts
         pip install --upgrade pip
         pip install -r requirements.txt
 
-    # ---------------------------------------------------------
-    # 5. Run Posting Alerts Script
-    # ---------------------------------------------------------
     - name: Run Posting Alerts Script
       env:
         LOCAL_MONGO_URI: ${{ secrets.LOCAL_MONGO_URI }}
@@ -71,9 +45,6 @@ jobs:
         cd Alerts
         python posting_alerts.py
 
-    # ---------------------------------------------------------
-    # 6. Debug Info on Failure
-    # ---------------------------------------------------------
     - name: Debug Info (on failure)
       if: failure()
       run: |
