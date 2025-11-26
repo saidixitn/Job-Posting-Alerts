@@ -291,6 +291,7 @@ def build_alerts(rows, utc, ist):
     queue_stuck = []
     drop = []
     push_more = []
+    hour_stopped = []  # ⭐ NEW LIST
 
     state_coll = local["domain_postings"]["domain_state"]
     domain_coll = local["domain_postings"]["domains"]
@@ -338,11 +339,16 @@ def build_alerts(rows, utc, ist):
             if curr_queue < quota_left:
                 push_more.append(r)
 
+        # ⭐ NEW ALERT — Posting stopped for last hr (you requested this)
+        if curr_posted > 0 and curr_hr == 0 and quota_left > 0:
+            hour_stopped.append(r)
+
     alert_groups = {
         "Posting Stopped": stopped,
         "Queue Stuck — No Posting Flow": queue_stuck,
         "Posting Drop Than Previous Hr": drop,
         "Push More Jobs — Queue Too Small": push_more,
+        "Posting Stopped — No Output This Hour": hour_stopped,  # ⭐ NEW
     }
 
     alerts = []
