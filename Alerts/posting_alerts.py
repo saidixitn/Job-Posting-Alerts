@@ -49,7 +49,12 @@ def get_chat_ids():
 
 def get_admin_chat_id():
     ids = get_chat_ids()
-    return ids.get("admin")
+    admin = ids.get("SaiDixit")
+
+    if not admin:
+        logging.error("SaiDixit chat ID missing in chatids.json")
+    return admin
+
 
 # ===================== DB ROUTING =====================
 def pick_db(dtype, domain):
