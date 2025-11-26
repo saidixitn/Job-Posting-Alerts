@@ -163,68 +163,44 @@ def process_proxy_domain(dom, utc):
 
     col = client[db_name][coll_name]
 
-    # DAY START
-    start_time = utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    # DAY START (UTC)
+    day_start = utc.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # MATCH STAGE
-    match_stage = {
-        "createdAt": {"$gte": start_time, "$lt": utc}
-    }
+    base_match = {}
     if emp:
-        match_stage["employerId"] = emp
+        base_match["employerId"] = emp
 
-    # PIPELINE exactly matching your query
-    pipeline = [
-        {"$match": match_stage},
-        {"$group": {
-            "_id": {
-                "employerId": "$employerId",
-                "date": {"$dateToString": {"format": "%Y-%m-%d", "date": "$createdAt"}}
-            },
-            "count": {"$sum": 1}
-        }},
-        {"$sort": {"_id.date": 1}}
-    ]
-
+    # --- TOTAL POSTED TODAY ---
+    day_match = {
+        **base_match,
+        "createdAt": {"$gte": day_start, "$lt": utc}
+    }
     try:
-        day_aggr = list(col.aggregate(pipeline))
+        posted = col.count_documents(day_match)
     except Exception as e:
-        logging.error(f"Proxy aggregation failed for {name}: {e}")
+        logging.error(f"Proxy day count failed for {name}: {e}")
         return None
 
-    # Total posted today = sum of date-level counts
-    posted = sum(x["count"] for x in day_aggr)
-
-    # Now compute hourly HR / PREV-HR
-    # Use hourly grouping separate from daily
-    hourly_pipeline = [
-        {"$match": {"createdAt": {"$gte": utc - timedelta(hours=2), "$lt": utc},
-                    **({"employerId": emp} if emp else {})}},
-        {"$group": {
-            "_id": {
-                "hour": {"$dateToString": {"format": "%Y-%m-%d %H", "date": "$createdAt"}}
-            },
-            "count": {"$sum": 1}
-        }}
-    ]
-
-    try:
-        hourly_aggr = list(col.aggregate(hourly_pipeline))
-    except:
-        hourly_aggr = []
-
+    # --- HOURLY WINDOWS ---
     hr1_start = utc.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
     hr2_start = hr1_start - timedelta(hours=1)
+    hr1_end = hr1_start + timedelta(hours=1)
 
-    hr1_key = hr1_start.strftime("%Y-%m-%d %H")
-    hr2_key = hr2_start.strftime("%Y-%m-%d %H")
+    hr1_match = {
+        **base_match,
+        "createdAt": {"$gte": hr1_start, "$lt": hr1_end}
+    }
+    hr2_match = {
+        **base_match,
+        "createdAt": {"$gte": hr2_start, "$lt": hr1_start}
+    }
 
-    hr = prev = 0
-    for a in hourly_aggr:
-        if a["_id"]["hour"] == hr1_key:
-            hr = a["count"]
-        elif a["_id"]["hour"] == hr2_key:
-            prev = a["count"]
+    try:
+        hr = col.count_documents(hr1_match)
+        prev = col.count_documents(hr2_match)
+    except Exception as e:
+        logging.error(f"Proxy hourly count failed for {name}: {e}")
+        hr = prev = 0
 
     return {
         "Domain": name,
@@ -232,7 +208,7 @@ def process_proxy_domain(dom, utc):
         "Hr": hr,
         "Prev": prev,
         "Diff": hr - prev,
-        "Queue": 0,
+        "Queue": 0,  # still 0 for proxy unless you have a queue concept here
         "QuotaLeft": max(0, quota - posted)
     }
 
@@ -360,12 +336,13 @@ def build_alerts(rows, utc, ist):
                 r["DropDiff"] = diff
                 posting_drop.append(r)
 
-        # 4) Push More Jobs — only if >5000
+        # 4) Push More Jobs — only if >= 5000
         if dtype != "proxy":
             left_today = quota_left
             push_needed = max(0, left_today - curr_queue)
 
-            if push_needed > 5000:  # <-- strict cutoff
+            # Fire only when we need at least 5k more jobs
+            if push_needed >= 5000:
                 r["PushAmountK"] = fmt_k(push_needed)
                 push_more.append(r)
 
