@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
     # -----------------------------
     # 0. Quiet Hours Check (IST)
     # -----------------------------
@@ -19,21 +20,19 @@ jobs:
         IST_TIME=$(TZ="Asia/Kolkata" date +%H:%M)
         echo "Current IST: $IST_TIME"
 
-        # Quiet hours: 02:30 → 12:30 IST
         if [[ "$IST_TIME" > "02:30" && "$IST_TIME" < "12:30" ]]; then
           echo "quiet_now=true" >> $GITHUB_ENV
-          echo "⏳ Quiet hours — skipping workflow."
         else
           echo "quiet_now=false" >> $GITHUB_ENV
         fi
 
     # -----------------------------
-    # Stop workflow early if quiet
+    # HARD STOP IF QUIET HOURS
     # -----------------------------
     - name: Stop During Quiet Hours
       if: env.quiet_now == 'true'
       run: |
-        echo "Quiet hours — exiting before running script."
+        echo "⏳ Quiet hours — skipping entire workflow."
         exit 0
 
     # -----------------------------
