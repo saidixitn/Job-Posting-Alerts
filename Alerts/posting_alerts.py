@@ -59,7 +59,6 @@ def get_admin_chat_id():
         return None
     return row["chat_id"]
 
-
 # ===================== DB ROUTING =====================
 def pick_db(dtype, domain):
     dtype = (dtype or "").lower()
@@ -443,7 +442,7 @@ def main():
         save_state(r, utc)
 
     # alerts still go to ALL chat IDs
-    for cid in get_chat_ids().values():
+    for cid in get_chat_ids():
         for a in alerts:
             send(cid, a)
 
