@@ -2,7 +2,7 @@ name: Posting Alerts
 
 on:
   schedule:
-    - cron: "0 * * * *"   # Every hour (UTC)
+    - cron: "0 * * * *"   # Every hour UTC
   workflow_dispatch:
 
 jobs:
@@ -11,50 +11,57 @@ jobs:
 
     steps:
 
-    # -----------------------------
-    # 0. HARD STOP DURING QUIET HOURS (IST)
-    # -----------------------------
-    - name: Quiet Hours Check (IST)
+    # ====================================================================
+    # 1. DETERMINE IF CURRENT TIME (IST) IS WITHIN QUIET HOURS
+    # ====================================================================
+    - name: Determine Quiet Hours
+      id: timecheck
       run: |
-        IST_TIME=$(TZ="Asia/Kolkata" date +%H:%M)
-        echo "Current IST: $IST_TIME"
-
-        # Convert HH:MM to pure number for comparison
-        IST_NUM=$(echo $IST_TIME | tr -d ':')
-
-        # Quiet hours: 02:30 → 12:30
-        # That is 0230 → 1230 numerically
-        if [ "$IST_NUM" -ge 0230 ] && [ "$IST_NUM" -lt 1230 ]; then
-          echo "⏳ Quiet hours — stopping workflow BEFORE setup."
-          exit 0
+        IST_TIME=$(TZ="Asia/Kolkata" date +%H%M)
+        echo "IST_TIME=$IST_TIME"
+        # Quiet hours range: 02:30 → 12:30
+        if [ "$IST_TIME" -ge 0230 ] && [ "$IST_TIME" -lt 1230 ]; then
+          echo "quiet=true" >> $GITHUB_OUTPUT
+        else
+          echo "quiet=false" >> $GITHUB_OUTPUT
         fi
 
-    # -----------------------------
-    # 1. Checkout Repository
-    # -----------------------------
+    # ====================================================================
+    # 2. STOP THE JOB COMPLETELY IF QUIET HOURS
+    # ====================================================================
+    - name: Stop job during quiet hours
+      if: steps.timecheck.outputs.quiet == 'true'
+      run: |
+        echo "⏳ Quiet hours — stopping workflow BEFORE heavy steps."
+        # Job ends here SUCCESSFULLY.
+        exit 0
+
+    # ====================================================================
+    # 3. Checkout Repository
+    # ====================================================================
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # -----------------------------
-    # 2. Setup Python
-    # -----------------------------
+    # ====================================================================
+    # 4. Setup Python
+    # ====================================================================
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: "3.11"
 
-    # -----------------------------
-    # 3. Install Dependencies
-    # -----------------------------
+    # ====================================================================
+    # 5. Install Dependencies
+    # ====================================================================
     - name: Install dependencies
       run: |
         cd Alerts
         pip install --upgrade pip
         pip install -r requirements.txt
 
-    # -----------------------------
-    # 4. Run Posting Alerts Script
-    # -----------------------------
+    # ====================================================================
+    # 6. Run the posting alert script
+    # ====================================================================
     - name: Run Posting Alerts Script
       env:
         LOCAL_MONGO_URI: ${{ secrets.LOCAL_MONGO_URI }}
@@ -64,9 +71,9 @@ jobs:
         cd Alerts
         python posting_alerts.py
 
-    # -----------------------------
-    # 5. Debug Info on Failure
-    # -----------------------------
+    # ====================================================================
+    # 7. Debug on failure
+    # ====================================================================
     - name: Debug Info (on failure)
       if: failure()
       run: |
