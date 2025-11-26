@@ -287,18 +287,16 @@ def fmt_k(n):
 # ============================================================
 def build_alerts(rows, utc, ist):
     if quiet_hours(ist):
-        return []
+        return [], []
 
-    # ==============================
-    # TOTAL POSTED (all domains)
-    # ==============================
     total_posted = sum(r["Posted"] for r in rows)
 
-    stopped = []
+    # Buckets
+    posting_stopped = []
     queue_stuck = []
-    drop = []
+    posting_drop = []
     push_more = []
-    hour_stopped = []
+    posting_zero_hour = []
 
     state_coll = local["domain_postings"]["domain_state"]
     domain_coll = local["domain_postings"]["domains"]
@@ -311,7 +309,6 @@ def build_alerts(rows, utc, ist):
         curr_hr = r["Hr"]
         quota_left = r["QuotaLeft"]
 
-        # normalize
         norm = name.strip().lower().rstrip("/")
         raw = domain_coll.find_one({"Domain": norm})
         dtype = raw.get("Domain Type", "").strip().lower() if raw else ""
@@ -320,52 +317,56 @@ def build_alerts(rows, utc, ist):
         prev_posted = prev.get("posted_prev", 0)
         prev_hr = prev.get("hr_prev", 0)
 
-        # 1️⃣ Posting Stopped
+        # 1) Posting Stopped (Today)
         if curr_posted == prev_posted and quota_left > 0:
-            stopped.append(r)
+            posting_stopped.append(r)
 
-        # 2️⃣ Queue Stuck (Non-proxy)
+        # 2) Queue Stuck
         if dtype != "proxy":
             if curr_queue > 0 and curr_posted == prev_posted and quota_left > 0:
                 queue_stuck.append(r)
 
-        # 3️⃣ Posting Drop — ONLY if drop > 500
+        # 3) Posting Drop >500 (Hour)
         if prev_hr > 0 and curr_hr < prev_hr:
-            drop_diff = prev_hr - curr_hr
-            if drop_diff > 500:
-                r["DropDiff"] = drop_diff
-                drop.append(r)
+            diff = prev_hr - curr_hr
+            if diff > 500:
+                r["DropDiff"] = diff
+                posting_drop.append(r)
 
-        # 4️⃣ Push More Jobs
+        # 4) Push More Jobs — Admin Only
         if dtype != "proxy":
             left_today = quota_left
             push_needed = max(0, left_today - curr_queue)
-
             if push_needed > 0:
                 r["PushAmountK"] = fmt_k(push_needed)
                 push_more.append(r)
 
-        # 5️⃣ Posting Stopped This Hour
+        # 5) Zero posts this hour
         if prev_hr > 0 and curr_hr == 0:
-            hour_stopped.append(r)
+            posting_zero_hour.append(r)
 
-    # Grouping alerts
-    alert_groups = {
-        "Posting Stopped": stopped,
+    # ---------------------------
+    # Definitions for admin/user
+    # ---------------------------
+    admin_groups = {
+        "Posting Stopped": posting_stopped,
         "Queue Stuck — No Posting Flow": queue_stuck,
-        "Posting Drop Than Previous Hr": drop,
+        "Posting Drop >500 Than Previous Hr": posting_drop,
         "Push More Jobs": push_more,
-        "Posting Stopped — No Postings This Hour": hour_stopped,
+        "Posting Stopped — No Postings This Hour": posting_zero_hour
     }
 
-    alerts = []
-    for title, items in alert_groups.items():
-        if not items:
-            continue
+    user_groups = {
+        "Posting Stopped": posting_stopped,
+        "Queue Stuck — No Posting Flow": queue_stuck,
+        "Posting Drop >500 Than Previous Hr": posting_drop
+        "Posting Stopped — No Postings This Hour": posting_zero_hour
+    }
 
-        # ==============================
-        # HEADER (now includes total posted)
-        # ==============================
+    # ---------------------------
+    # Helper to format messages
+    # ---------------------------
+    def build_message(title, items):
         msg = (
             f"⚠️ <b>{title}</b>\n"
             f"UTC {utc:%H:%M} | IST {ist:%H:%M}\n"
@@ -373,25 +374,36 @@ def build_alerts(rows, utc, ist):
             f"📦 Total Posted Today: <b>{fmt_k(total_posted)}</b>\n\n"
         )
 
-        # ==============================
-        # PER-DOMAIN DETAIL
-        # ==============================
         for r in items:
             msg += f"• <b>{r['Domain']}</b>\n"
             msg += f"  Hr: {r['Hr']} | PrevHr: {r['Prev']}\n"
             msg += f"  Queue: {fmt_k(r['Queue'])}\n"
 
-            if "DropDiff" in r:
+            if 'DropDiff' in r:
                 msg += f"  Drop: {fmt_k(r['DropDiff'])}\n"
 
-            if "PushAmountK" in r:
+            if 'PushAmountK' in r:
                 msg += f"  Push: {r['PushAmountK']} jobs\n"
 
             msg += f"  Left today: {fmt_k(r['QuotaLeft'])}\n\n"
 
-        alerts.append(msg)
+        return msg
 
-    return alerts
+    # ---------------------------
+    # Build actual alert lists
+    # ---------------------------
+    admin_alerts = []
+    user_alerts = []
+
+    for title, items in admin_groups.items():
+        if items:
+            admin_alerts.append(build_message(title, items))
+
+    for title, items in user_groups.items():
+        if items:
+            user_alerts.append(build_message(title, items))
+
+    return admin_alerts, user_alerts
 
 # ============================================================
 # MAIN
@@ -426,8 +438,10 @@ def main():
 
     results.sort(key=lambda x: x["Posted"], reverse=True)
 
-    # SEND SUMMARY TO ADMIN
+    # ADMIN CHAT ID
     admin_cid = get_admin_chat_id()
+
+    # SEND SUMMARY TO ADMIN (ONLY)
     if admin_cid:
         summary = "📊 <b>Posting Summary</b>\n\n"
         for r in results:
@@ -439,17 +453,29 @@ def main():
             )
         send(admin_cid, summary)
 
-    alerts = build_alerts(results, utc, ist)
+    # BUILD ALERTS (ADMIN + USER)
+    admin_alerts, user_alerts = build_alerts(results, utc, ist)
 
+    # SAVE STATE FOR ALL DOMAINS
     for r in results:
         save_state(r, utc)
 
-    for cid in get_chat_ids():
-        for a in alerts:
+    # SEND ALL ALERTS TO ADMIN
+    if admin_cid:
+        for a in admin_alerts:
+            send(admin_cid, a)
+
+    # SEND REGULAR ALERTS TO NON-ADMIN USERS
+    chat_ids = get_chat_ids()
+    for cid in chat_ids:
+        if admin_cid and cid == admin_cid:
+            continue
+        for a in user_alerts:
             send(cid, a)
 
     print(f"\nDone in {(datetime.now()-start).total_seconds():.2f}s\n")
     logging.info("Run OK.")
+
 
 if __name__ == "__main__":
     main()
