@@ -282,16 +282,23 @@ def save_state(row, utc):
         upsert=True
     )
 
+# ===================== NUMBER FORMATTER =====================
+def fmt_k(n):
+    """Format numbers as Xk (1 decimal)."""
+    return f"{round(n / 1000, 1)}k"
+
+
 # ===================== PRINT =====================
 def print_summary(rows):
     print("\n======== RESULTS ========\n")
     for r in rows:
         print(f"{r['Domain']}")
-        print(f"  Posted: {r['Posted']}")
-        print(f"  Hr: {r['Hr']} | Prev: {r['Prev']} | Diff: {r['Diff']}")
-        print(f"  Queue: {r['Queue']} | Left: {r['QuotaLeft']}")
+        print(f"  Posted: {fmt_k(r['Posted'])}")
+        print(f"  Hr: {fmt_k(r['Hr'])} | Prev: {fmt_k(r['Prev'])} | Diff: {fmt_k(r['Diff'])}")
+        print(f"  Queue: {fmt_k(r['Queue'])} | Left: {fmt_k(r['QuotaLeft'])}")
         print("------------------------------------")
     print("==========================\n")
+
 
 # ===================== ALERTS =====================
 def build_alerts(rows, utc, ist):
@@ -344,7 +351,7 @@ def build_alerts(rows, utc, ist):
             new_left = max(0, (quota_left + curr_posted) - total_done)
 
             if new_left > 0:
-                r["PushAmountK"] = round(new_left / 1000, 2)
+                r["PushAmountK"] = fmt_k(new_left)
                 push_more.append(r)
 
         # 5️⃣ Posting stopped this hour (NEW)
@@ -372,13 +379,13 @@ def build_alerts(rows, utc, ist):
 
         for r in items:
             msg += f"• <b>{r['Domain']}</b>\n"
-            msg += f"  Hr: {r['Hr']} | PrevHr: {r['Prev']}\n"
-            msg += f"  Queue: {r['Queue']}\n"
+            msg += f"  Hr: {fmt_k(r['Hr'])} | PrevHr: {fmt_k(r['Prev'])}\n"
+            msg += f"  Queue: {fmt_k(r['Queue'])}\n"
 
-            if "PushAmountK" in r:
-                msg += f"  Push: {r['PushAmountK']}k jobs\n"
+            if 'PushAmountK' in r:
+                msg += f"  Push: {r['PushAmountK']} jobs\n"
 
-            msg += f"  Left: {r['QuotaLeft']}\n\n"
+            msg += f"  Left: {fmt_k(r['QuotaLeft'])}\n\n"
 
         alerts.append(msg)
 
@@ -428,9 +435,9 @@ def main():
         for r in results:
             summary += (
                 f"• <b>{r['Domain']}</b>\n"
-                f"  Posted: {r['Posted']}\n"
-                f"  Hr: {r['Hr']} | PrevHr: {r['Prev']}\n"
-                f"  Queue: {r['Queue']} | Left: {r['QuotaLeft']}\n\n"
+                f"  Posted: {fmt_k(r['Posted'])}\n"
+                f"  Hr: {fmt_k(r['Hr'])} | PrevHr: {fmt_k(r['Prev'])}\n"
+                f"  Queue: {fmt_k(r['Queue'])} | Left: {fmt_k(r['QuotaLeft'])}\n\n"
             )
         send(admin_cid, summary)
     else:
