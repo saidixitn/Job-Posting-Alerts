@@ -369,23 +369,27 @@ def build_alerts(rows, utc, ist):
     def build_message(title, items):
         msg = (
             f"⚠️ <b>{title}</b>\n"
-            f"UTC {utc:%H:%M} | IST {ist:%H:%M}\n"
-            f"<b>{len(items)} domain(s) affected</b>\n"
-            f"📦 Total Posted Today: <b>{fmt_k(total_posted)}</b>\n\n"
+            f"IST {ist:%H:%M}\n\n"
         )
 
         for r in items:
-            msg += f"• <b>{r['Domain']}</b>\n"
-            msg += f"  Hr: {r['Hr']} | PrevHr: {r['Prev']}\n"
-            msg += f"  Queue: {fmt_k(r['Queue'])}\n"
+            msg += f"<b>{r['Domain']}</b>\n"
+            msg += (
+                f"  Posted: {fmt_k(r['Posted'])} | "
+                f"Hr: {r['Hr']} | Prev: {r['Prev']}\n"
+            )
+            msg += (
+                f"  Q: {fmt_k(r['Queue'])} | "
+                f"Left: {fmt_k(r['QuotaLeft'])}"
+            )
 
-            if 'DropDiff' in r:
-                msg += f"  Drop: {fmt_k(r['DropDiff'])}\n"
+            if "PushAmountK" in r:
+                msg += f" | Push: {r['PushAmountK']}"
 
-            if 'PushAmountK' in r:
-                msg += f"  Push: {r['PushAmountK']} jobs\n"
+            if "DropDiff" in r:
+                msg += f" | Drop: {fmt_k(r['DropDiff'])}"
 
-            msg += f"  Left today: {fmt_k(r['QuotaLeft'])}\n\n"
+            msg += "\n\n"
 
         return msg
 
