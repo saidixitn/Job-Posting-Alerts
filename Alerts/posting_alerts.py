@@ -358,8 +358,8 @@ def build_alerts(rows, utc, ist):
         "Posting Stopped": stopped,
         "Queue Stuck — No Posting Flow": queue_stuck,
         "Posting Drop Than Previous Hr": drop,
-        "Push More Jobs — Queue Too Small": push_more,
-        "Posting Stopped — No Output This Hour": hour_stopped,  # ⭐ NEW
+        "Push More Jobs": push_more,
+        "Posting Stopped — No Postings This Hour": hour_stopped,  # ⭐ NEW
     }
 
     alerts = []
