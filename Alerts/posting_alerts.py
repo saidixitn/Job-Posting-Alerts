@@ -350,16 +350,17 @@ def build_alerts(rows, utc, ist):
     # ---------------------------
     admin_groups = {
         "Posting Stopped": posting_stopped,
-        "Queue Stuck — No Posting Flow": queue_stuck,
+        "Queue Stuck - No Posting Flow": queue_stuck,
         "Posting Drop >500 Than Previous Hr": posting_drop,
         "Push More Jobs": push_more,
-        "Posting Stopped — No Postings This Hour": posting_zero_hour
+        "Posting Stopped - No Postings This Hour": posting_zero_hour
     }
 
     user_groups = {
         "Posting Stopped": posting_stopped,
-        "Queue Stuck — No Posting Flow": queue_stuck,
+        "Queue Stuck - No Posting Flow": queue_stuck,
         "Posting Drop >500 Than Previous Hr": posting_drop
+        "Posting Stopped - No Postings This Hour": posting_zero_hour
     }
 
     # ---------------------------
