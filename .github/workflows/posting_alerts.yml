@@ -3,13 +3,39 @@ name: Posting Alerts
 on:
   schedule:
     - cron: "0 * * * *"   # Runs every hour (UTC)
-  workflow_dispatch:       # Manual trigger
+  workflow_dispatch:
 
 jobs:
   run-alerts:
     runs-on: ubuntu-latest
 
     steps:
+    # -----------------------------
+    # 0. Quiet Hours Check (IST)
+    # -----------------------------
+    - name: Check IST Quiet Hours
+      id: quiet
+      run: |
+        IST_TIME=$(TZ="Asia/Kolkata" date +%H:%M)
+        echo "Current IST: $IST_TIME"
+
+        # Quiet hours: 02:30 → 12:30 IST
+        if [[ "$IST_TIME" > "02:30" && "$IST_TIME" < "12:30" ]]; then
+          echo "quiet_now=true" >> $GITHUB_ENV
+          echo "⏳ Quiet hours — skipping workflow."
+        else
+          echo "quiet_now=false" >> $GITHUB_ENV
+        fi
+
+    # -----------------------------
+    # Stop workflow early if quiet
+    # -----------------------------
+    - name: Stop During Quiet Hours
+      if: env.quiet_now == 'true'
+      run: |
+        echo "Quiet hours — exiting before running script."
+        exit 0
+
     # -----------------------------
     # 1. Checkout Repository
     # -----------------------------
