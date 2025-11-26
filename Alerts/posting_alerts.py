@@ -163,7 +163,7 @@ def process_proxy_domain(dom, utc):
 
     col = client[db_name][coll_name]
 
-    start_time = utc - timedelta(hours=2)
+    start_time = utc.replace(hour=0, minute=0, second=0, microsecond=0)
     match_stage = {"createdAt": {"$gte": start_time, "$lt": utc}}
     if emp:
         match_stage["employerId"] = emp
@@ -333,11 +333,12 @@ def build_alerts(rows, utc, ist):
                 r["DropDiff"] = diff
                 posting_drop.append(r)
 
-        # 4) Push More Jobs — Admin Only
+        # 4) Push More Jobs — only if >5000
         if dtype != "proxy":
             left_today = quota_left
             push_needed = max(0, left_today - curr_queue)
-            if push_needed > 0:
+
+            if push_needed > 5000:  # <-- strict cutoff
                 r["PushAmountK"] = fmt_k(push_needed)
                 push_more.append(r)
 
