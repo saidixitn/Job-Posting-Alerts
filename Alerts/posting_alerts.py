@@ -33,7 +33,10 @@ def now_times():
     return utc, ist
 
 def quiet_hours(ist):
-    return (ist.hour == 2 and ist.minute >= 30) or (3 <= ist.hour < 11) or (ist.hour == 11 and ist.minute < 30)
+    # Quiet hours: 02:30 IST → 12:30 IST
+    start = ist.replace(hour=2, minute=30, second=0, microsecond=0)
+    end   = ist.replace(hour=12, minute=30, second=0, microsecond=0)
+    return start <= ist < end
 
 def make_aware(dt):
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -378,6 +381,13 @@ def main():
     start = datetime.now()
     utc, ist = now_times()
 
+    # ========== QUIET HOURS CHECK ==========
+    if quiet_hours(ist):
+        print(f"⏳ Quiet hours (IST {ist:%H:%M}) — Skipping execution.")
+        logging.info("Quiet hours — Script stopped before running.")
+        return
+    # =======================================
+
     domains = list(local["domain_postings"]["domains"].find({}, {"_id": 0}))
     print("Loaded domains:", len(domains))
 
@@ -430,6 +440,7 @@ def main():
 
     print(f"\nDone in {(datetime.now() - start).total_seconds():.2f}s\n")
     logging.info("Run OK.")
+
 
 if __name__ == "__main__":
     main()
