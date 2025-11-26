@@ -299,42 +299,47 @@ def build_alerts(rows, utc, ist):
     domain_coll = local["domain_postings"]["domains"]
 
     for r in rows:
+
         name = r["Domain"]
         curr_posted = r["Posted"]
         curr_queue = r["Queue"]
         curr_hr = r["Hr"]
-        quota_left = r["QuotaLeft"]
+        quota_left = r["QuotaLeft"]  # = quota - posted (today)
 
-        norm = name.strip().lower()
+        # normalize
+        norm = name.strip().lower().rstrip("/")
         raw = domain_coll.find_one({"Domain": norm})
-        dtype = raw.get("Domain Type", "").lower() if raw else ""
+        dtype = raw.get("Domain Type", "").strip().lower() if raw else ""
 
         prev = state_coll.find_one({"domain": name}) or {}
         prev_posted = prev.get("posted_prev", 0)
         prev_hr = prev.get("hr_prev", 0)
 
-        # Posting stopped
+        # 1️⃣ Posting Stopped
         if curr_posted == prev_posted and quota_left > 0:
             stopped.append(r)
 
-        # Queue stuck
-        if dtype != "proxy" and curr_queue > 0 and curr_posted == prev_posted:
-            queue_stuck.append(r)
+        # 2️⃣ Queue Stuck (non-proxy)
+        if dtype != "proxy":
+            if curr_queue > 0 and curr_posted == prev_posted and quota_left > 0:
+                queue_stuck.append(r)
 
-        # Posting drop
+        # 3️⃣ Posting Drop (prev hour > this hour)
         if prev_hr > 0 and curr_hr < prev_hr:
             drop.append(r)
 
-        # Push more = quota - posted
+        # 4️⃣ Push More Jobs — NOW: (quota - posted) - queue
         if dtype != "proxy":
-            push_needed = max(0, (curr_posted + quota_left) - curr_posted)
-            push_needed = quota_left
+            # remaining capacity today
+            left_today = quota_left          # quota - posted
+            # how many more to load into queue to utilize that capacity
+            push_needed = max(0, left_today - curr_queue)
 
             if push_needed > 0:
                 r["PushAmountK"] = fmt_k(push_needed)
                 push_more.append(r)
 
-        # Stopped this hour
+        # 5️⃣ Posting stopped this hour
         if prev_hr > 0 and curr_hr == 0:
             hour_stopped.append(r)
 
@@ -343,7 +348,7 @@ def build_alerts(rows, utc, ist):
         "Queue Stuck — No Posting Flow": queue_stuck,
         "Posting Drop Than Previous Hr": drop,
         "Push More Jobs": push_more,
-        "Posting Stopped — No Postings This Hour": hour_stopped
+        "Posting Stopped — No Postings This Hour": hour_stopped,
     }
 
     alerts = []
@@ -362,7 +367,7 @@ def build_alerts(rows, utc, ist):
             msg += f"  Hr: {r['Hr']} | PrevHr: {r['Prev']}\n"
             msg += f"  Queue: {fmt_k(r['Queue'])}\n"
 
-            if "PushAmountK" in r:
+            if 'PushAmountK' in r:
                 msg += f"  Push: {r['PushAmountK']} jobs\n"
 
             msg += f"  Left today: {fmt_k(r['QuotaLeft'])}\n\n"
