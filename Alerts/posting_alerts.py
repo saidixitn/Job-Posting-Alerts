@@ -292,8 +292,6 @@ def build_alerts(rows, utc, ist):
     if quiet_hours(ist):
         return [], []
 
-    total_posted = sum(r["Posted"] for r in rows)
-
     # Buckets
     posting_stopped = []
     queue_stuck = []
@@ -317,36 +315,52 @@ def build_alerts(rows, utc, ist):
         dtype = raw.get("Domain Type", "").strip().lower() if raw else ""
 
         prev = state_coll.find_one({"domain": name}) or {}
-        prev_posted = prev.get("posted_prev", 0)
-        prev_hr = prev.get("hr_prev", 0)
 
-        # 1) Posting Stopped (Today) — ONLY when nothing posted in this hour
-        if curr_posted == prev_posted and curr_hr == 0 and quota_left > 0:
+        # Previous state
+        prev_posted = prev.get("posted_prev", 0)
+        prev_queue  = prev.get("queue_prev", 0)
+        prev_hr     = prev.get("hr_prev", 0)
+
+        # Derived flags
+        quota_completed = quota_left <= 0
+        no_posting_change = curr_posted == prev_posted
+        no_queue_change   = curr_queue == prev_queue
+
+        # --------------------------------------------------
+        # 🔒 HARD STOP: If quota is completed → NO alerts
+        # --------------------------------------------------
+        if quota_completed:
+            continue
+
+        # --------------------------------------------------
+        # 1) Posting / Queue Stalled
+        # --------------------------------------------------
+        if curr_hr == 0 and (no_posting_change or no_queue_change):
             posting_stopped.append(r)
 
-        # 2) Queue Stuck
-        if dtype != "proxy":
-            if curr_queue > 0 and curr_posted == prev_posted and quota_left > 0:
-                queue_stuck.append(r)
-
-        # 3) Posting Drop >500 (Hour)
+        # --------------------------------------------------
+        # 2) Posting Drop >500 (Hour)
+        # --------------------------------------------------
         if prev_hr > 0 and curr_hr < prev_hr:
             diff = prev_hr - curr_hr
             if diff > 500:
                 r["DropDiff"] = diff
                 posting_drop.append(r)
 
-        # 4) Push More Jobs — only if >= 5000
+        # --------------------------------------------------
+        # 3) Push More Jobs (logic unchanged)
+        # --------------------------------------------------
         if dtype != "proxy":
             left_today = quota_left
             push_needed = max(0, left_today - curr_queue)
 
-            # Fire only when we need at least 5k more jobs
             if push_needed >= 5000:
                 r["PushAmountK"] = fmt_k(push_needed)
                 push_more.append(r)
 
-        # 5) Zero posts this hour
+        # --------------------------------------------------
+        # 4) Zero posts this hour (quota NOT completed)
+        # --------------------------------------------------
         if prev_hr > 0 and curr_hr == 0:
             posting_zero_hour.append(r)
 
@@ -355,7 +369,6 @@ def build_alerts(rows, utc, ist):
     # ---------------------------
     admin_groups = {
         "Posting Stopped": posting_stopped,
-        "Queue Stuck - No Posting Flow": queue_stuck,
         "Posting Drop >500 Than Previous Hr": posting_drop,
         "Push More Jobs": push_more,
         "Posting Stopped - No Postings This Hour": posting_zero_hour
@@ -363,7 +376,6 @@ def build_alerts(rows, utc, ist):
 
     user_groups = {
         "Posting Stopped": posting_stopped,
-        "Queue Stuck - No Posting Flow": queue_stuck,
         "Posting Drop >500 Than Previous Hr": posting_drop,
         "Posting Stopped - No Postings This Hour": posting_zero_hour
     }
