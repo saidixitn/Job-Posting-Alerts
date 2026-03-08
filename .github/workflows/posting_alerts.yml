@@ -1,4 +1,4 @@
-name: Posting Alerts
+name: Posting Alerts Workflow
 
 on:
   schedule:
